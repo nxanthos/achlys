@@ -29,7 +29,9 @@
         }
     }},
     {boards, [
-        achlys@my_grisp_board_1
+        achlys@my_grisp_board_1,
+        achlys@my_grisp_board_2,
+        achlys@my_grisp_board_3
     ]}
 ]} ,
 
@@ -40,7 +42,7 @@
 
 {partisan , [
     {peer_ip, {${PEER_IP}}},
-    {peer_port, {${PORT}}},
+    {peer_port, {${PEER_PORT}}},
     {partisan_peer_service_manager , partisan_default_peer_service_manager} ,
     {acceptor_pool_size, 5}
 ]} ,

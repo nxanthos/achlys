@@ -21,6 +21,7 @@ COOKIE               ?= MyCookie
 NAME 				 := $(shell hostname -s)
 PEER_IP 	 		 := $(shell ifconfig | grep 'inet ' | grep -m 1 -Fv 127.0.0.1 | awk '{print $$2}' | sed 's/\./,/g')
 IP 	 				 := $(shell ifconfig | grep 'inet ' | grep -m 1 -Fv 127.0.0.1 | awk '{print $$2}')
+PEER_PORT			 := 27000
 PRE         = @
 POST        =
 REBAR_DEBUG =
@@ -72,7 +73,8 @@ compile:
 shell:
 	@ echo Launching shell
 	$(PRE) \
-	    NAME=$(NAME) PEER_IP=$(PEER_IP) IP=$(IP) $(REBAR) as test shell --sname $(GRISPAPP)$(n) --setcookie $(COOKIE) --apps $(GRISPAPP) $(POST)
+	    # NAME=$(NAME) PEER_IP=$(PEER_IP) IP=$(IP) PEER_PORT=$(PEER_PORT) $(REBAR) as test shell --sname $(GRISPAPP)$(n) --setcookie $(COOKIE) --apps $(GRISPAPP) $(POST)
+		NAME=$(NAME) PEER_IP=$(PEER_IP) IP=$(IP) PEER_PORT=$(PEER_PORT) $(REBAR) as test shell --sname node --setcookie $(COOKIE) --apps $(GRISPAPP) $(POST)
 
 deploy:
 	@ echo Deploying
@@ -86,12 +88,15 @@ erlshell:
 	@ echo Compiling user_default module
 	$(PRE) erlc -o $(TOOLS_DIR) $(TOOLS_DIR)/user_default.erl $(POST)
 	$(PRE) \
+			export PEER_IP=$(PEER_IP) && \
+            export IP=$(IP) && \
+			export PEER_PORT=$(PEER_PORT) && \
 			export $(NAME_UPPER)_BUILD=SHELL && \
 			export DEBUG=$(REBAR_DEBUG) && \
 			export $(NAME_UPPER)_VERSION=$(VERSION) && \
 			$(REBAR) compile \
 		$(POST) && \
-		erl -pa `ls -d _build/default/lib/*/ebin` \
+		erl -pa `ls -d _build/default/lib/*/ebin` -noshell -detached \
 				-pz $(TOOLS_DIR) \
 				-config $(CFG_DIR)/sys.config \
 				-args_file $(CFG_DIR)/vm.args \
