@@ -3,8 +3,9 @@
 CFG_DIR              = $(CURDIR)/config
 GRISP_FILES_DIR      = $(CURDIR)/grisp/grisp_base/files
 TOOLS_DIR            = $(CURDIR)/tools
-HOST_REBAR           = rebar3
-REBAR                = $(TOOLS_DIR)/rebar3
+# HOST_REBAR           = rebar3
+# REBAR                = $(TOOLS_DIR)/rebar3
+REBAR                = rebar3
 # LIB_CACHE_DIR          = $(LOCAL_REBAR_DIR)/lib/*/ebin
 # PLUGIN_CACHE_DIR          = $(LOCAL_REBAR_DIR)/plguins/*/ebin
 LIB_CACHE_DIR          = $(LOCAL_REBAR_DIR)/lib
@@ -18,9 +19,8 @@ GRISPAPP             ?= $(shell basename `find src -name "*.app.src"` .app.src)
 REBAR_CONFIG         = $(CURDIR)/rebar.config
 COOKIE               ?= MyCookie
 NAME 				 := $(shell hostname -s)
-PEER_IP 	 		 := $(ifconfig | grep 'inet ' | grep -m 1 -Fv 127.0.0.1 | awk '{print $2}' | sed 's/\./,/g')
-IP 	 				 := $(ifconfig | grep 'inet ' | grep -m 1 -Fv 127.0.0.1 | awk '{print $2}')
-
+PEER_IP 	 		 := $(shell ifconfig | grep 'inet ' | grep -m 1 -Fv 127.0.0.1 | awk '{print $$2}' | sed 's/\./,/g')
+IP 	 				 := $(shell ifconfig | grep 'inet ' | grep -m 1 -Fv 127.0.0.1 | awk '{print $$2}')
 PRE         = @
 POST        =
 REBAR_DEBUG =
@@ -43,7 +43,6 @@ endif
 ifndef ERL
 $(error Could not find Erlang/OTP ('erl' command) installed on this system.)
 endif
-
 
 .PHONY: all compile checkrebar3 shell erlshell docs test dialyzer cover release package tar clean relclean push upbar addemu deploy cacheclean build upgrade tree
 
