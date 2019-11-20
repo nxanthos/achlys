@@ -53,6 +53,8 @@ grisp/
 
 grisp/grisp_base/files/
 
+grisp/grisp_base/files/wpa_supplicant.conf
+
 *.dump
 
 achlys-0.3.2.tar.gz
@@ -60,3 +62,5 @@ achlys-0.3.2.tar.gz
 achlys.iml
 
 rebar.lock
+
+default.env
