@@ -44,15 +44,23 @@ start(_StartType , _StartArgs) ->
             % the supervisor has been initialized.
             {ok, _} = application:ensure_all_started(grisp),
             LEDs = [1, 2],
-            [grisp_led:color(L, red) || L <- LEDs],
+            [grisp_led:color(L, green) || L <- LEDs],
+            initiate_sensors(),
             % {ok, PeerIp} = inet:parse_ipv4_address(os:getenv("IP")),
             % logger:log(critical, "Peer IP : ~p ~n", [PeerIp]),
             % application:set_env(partisan, peer_ip, PeerIp),
             % logger:log(critical, "Peer IP set~n"),
+
+            % achlys:clusterize(),
+            % initiate_sensors(),
+            % spawn(achlys, light_percentage, []),
             {ok , Pid};
         Error ->
             {error, Error}
     end.
+
+initiate_sensors() ->
+    grisp:add_device(spi2, pmod_als).
 
 %%--------------------------------------------------------------------
 %% @private
