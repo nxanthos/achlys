@@ -28,9 +28,7 @@
             }
         }
     }},
-    {boards, [
-        achlys@my_grisp_board_1
-    ]}
+    {boards, [${BOARDS}]}
 ]} ,
 
 {plumtree, [
@@ -40,7 +38,7 @@
 
 {partisan , [
     {peer_ip, {${PEER_IP}}},
-    {peer_port, 27000},
+    {peer_port, ${PEER_PORT}},
     {partisan_peer_service_manager , partisan_default_peer_service_manager} ,
     {acceptor_pool_size, 5}
 ]} ,
