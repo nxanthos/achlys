@@ -64,3 +64,5 @@ achlys.iml
 rebar.lock
 
 default.env
+
+rebarconfig.json
