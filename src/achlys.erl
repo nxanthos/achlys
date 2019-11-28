@@ -70,7 +70,9 @@
 %%====================================================================
 -export([rainbow/0]).
 -export([light/0]).
+-export([light_percentage/0]).
 -export([mintemp/0]).
+-export([minlight/0]).
 %%====================================================================
 
 %% API
@@ -192,6 +194,50 @@ light() ->
             AmbLight
     end.
 
+-spec light_percentage() -> erlang:function().
+light_percentage() ->
+    Percentage = pmod_als:percentage(),
+    if
+        Percentage < 20 -> [grisp_led:color(L, red) || L <- [1,2]];
+        Percentage < 40 -> [grisp_led:color(L, magenta) || L <- [1,2]];
+        Percentage < 60 -> [grisp_led:color(L, yellow) || L <- [1,2]];
+        Percentage < 80 -> [grisp_led:color(L, white) || L <- [1,2]];
+        true -> [grisp_led:color(L, aqua) || L <- [1,2]]
+    end,
+    timer:sleep(2500),
+    [grisp_led:color(L, green) || L <- [1,2]],
+    timer:sleep(2500),
+    light_percentage().
+
+-spec minlight() -> erlang:function().
+minlight() ->
+    F = fun() ->
+        Id = {<<"light">>, state_gset},
+        {ok, {_, _, _, _}} = lasp:declare(Id, state_gset),
+        L = lists:foldl(fun
+            (Elem, AccIn) -> timer:sleep(5000),
+                Light = pmod_als:percentage(),
+                [Light] ++ AccIn
+        end, [], lists:seq(1,5)),
+        SList = lists:usort(L),
+        Min = hd(SList),
+        Name = node(),
+        lasp:update(Id, {add, {Min, Name}}, self()),
+        spawn(fun() ->
+                lasp:read(Id, {cardinality, 2}),
+                {ok, S} = lasp:query(Id),
+                Fetched = sets:to_list(S),
+                {Minimum, Node} = hd(lists:usort(Fetched)),
+                Self = node(),
+                case Node =:= Self of
+                    true ->
+                        [ grisp_led:color(X, blue) || X <- [1,2] ];
+                    _ ->
+                        [ grisp_led:color(X, red) || X <- [1,2] ]
+                end
+        end)
+    end.
+
 -spec mintemp() -> erlang:function().
 mintemp() ->
     F = fun() ->
@@ -270,7 +316,7 @@ bane(Data) ->
 -spec bane_all_preys(atom()) -> list().
 bane_all_preys(temperature) ->
     logger:log(notice , "Reading temperature CRDT ~n", []) ,
-    lists:flatten([ achlys_util:query(Id) || Id <- ?TEMP_LIST ]);
+    lists:flatten([ achlys_util:query(Id) || Id <- ?PRESS_LIST ]);
 bane_all_preys(pressure) ->
     logger:log(notice , "Reading pressure CRDT ~n", []) ,
     lists:flatten([ achlys_util:query(Id) || Id <- ?PRESS_LIST ]);

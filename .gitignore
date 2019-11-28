@@ -45,10 +45,24 @@ logs/debug\.siz
 
 achlys-0\.3\.0/
 
+achlys-0\.3\.2/
+
 logs/
 
-achlys-0.3.2/
+grisp/
+
+grisp/grisp_base/files/
+
+grisp/grisp_base/files/wpa_supplicant.conf
+
+*.dump
 
 achlys-0.3.2.tar.gz
 
+achlys.iml
+
+rebar.lock
+
 default.env
+
+rebarconfig.json
