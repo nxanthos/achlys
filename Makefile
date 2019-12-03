@@ -21,6 +21,7 @@ COOKIE               	?= MyCookie
 NAME			:= $(shell hostname -s)
 PEER_IP 	 	:= $(shell ifconfig | grep 'inet ' | grep -m 1 -Fv 127.0.0.1 | awk '{print $$2}' | sed 's/\./,/g')
 IP			:= $(shell ifconfig | grep 'inet ' | grep -m 1 -Fv 127.0.0.1 | awk '{print $$2}')
+PEER_PORT		:= 27000
 PRE         = @
 POST        =
 REBAR_DEBUG =
@@ -72,7 +73,7 @@ compile:
 shell:
 	@ echo Launching shell
 	$(PRE) \
-	    NAME=$(NAME) PEER_IP=$(PEER_IP) IP=$(IP) $(REBAR) as test shell --name '$(GRISPAPP)$(n)@$(IP)' --setcookie $(COOKIE) --apps $(GRISPAPP) $(POST)
+	    NAME=$(NAME) PEER_IP=$(PEER_IP) IP=$(IP) PEER_PORT=$(PEER_PORT) $(REBAR) as test shell --name '$(GRISPAPP)$(n)@$(IP)' --setcookie $(COOKIE) --apps $(GRISPAPP) $(POST)
 
 deploy:
 	@ echo Deploying
