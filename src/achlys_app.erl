@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @author Igor Kopestenski <igor.kopestenski@uclouvain.be>
-%%%     [https://github.com/Laymer/achlys]
+%%%     [https://github.com/achlysproject/achlys]
 %%% @doc
 %%% The Achlys OTP application module
 %%% @end
@@ -84,7 +84,6 @@ initiate_sensors() ->
 %%--------------------------------------------------------------------
 -spec(stop(State :: term()) -> ok).
 stop(_State) ->
-    achlys:stop(),
     ok.
 
 %%%===================================================================
