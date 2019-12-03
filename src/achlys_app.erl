@@ -45,6 +45,17 @@ start(_StartType , _StartArgs) ->
             {ok, _} = application:ensure_all_started(grisp),
             LEDs = [1, 2],
             [grisp_led:color(L, green) || L <- LEDs],
+
+            % spawn(achlys_event, add_event, [{<<"set">>, state_gset}]),
+            
+            Listener = achlys_event:create_listener({<<"set">>, state_gset}),
+            Listener ! {on_change, fun(Value) -> 
+                io:format("~p~n", ["Hello 1"])
+            end},
+            Listener ! {on_change, fun(Value) -> 
+                io:format("~p~n", ["Hello 2"])
+            end},
+
             initiate_sensors(),
             % {ok, PeerIp} = inet:parse_ipv4_address(os:getenv("IP")),
             % logger:log(critical, "Peer IP : ~p ~n", [PeerIp]),
