@@ -2,112 +2,113 @@
 
 -behaviour(gen_server).
 
-%% API
 -export([start_link/0]).
 -export([schedule_task/0]).
-
-%% gen_server callbacks
--export([init/1,
-  handle_call/3,
-  handle_cast/2,
-  handle_info/2,
-  terminate/2,
-  code_change/3]).
+-export([debug/0]).
+-export([
+    init/1 ,
+    handle_call/3 ,
+    handle_cast/2 ,
+    handle_info/2 ,
+    terminate/2 ,
+    code_change/3
+]).
 
 -define(SERVER, ?MODULE).
 
 -record(state, {}).
 
 start_link() ->
-  gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+    gen_server:start_link({local , ?SERVER} , ?MODULE , [] , []).
 
 init([]) ->
-  % schedule_task(),
-  {ok, #state{}}.
+    {ok , #state{}}.
 
-handle_call(_Request, _From, State) ->
-  {reply, ok, State}.
+handle_call(_Request, _From , State) ->
+    {reply , ok , State}.
 
 handle_cast(_Request, State) ->
-  {noreply, State}.
-
-handle_info({task, Task}, State) ->
-  %% Task propagation to the cluster, including self
-  io:format("Starting task", []),
-  achlys:bite(Task),
-  {noreply, State};
+    {noreply , State}.
 
 handle_info(_Info, State) ->
-  {noreply, State}.
+    case _Info of
+        {task, Task} -> 
+            io:format("Starting task ~n", []),
+            achlys:bite(Task)
+    end,
+    {noreply , State}.
 
 terminate(_Reason, _State) ->
-  ok.
+    ok.
 
 code_change(_OldVsn, State, _Extra) ->
-  {ok, State}.
+    {ok , State}.
 
 schedule_task() ->
-  F = fun() ->
-    Set = {<<"set">>, state_gset},
+    Task = achlys:declare(mytask, all, single, fun() ->
 
-      % lasp:declare(V1, state_gcounter),
-      % lasp:declare(V2, state_gcounter),
-      lasp:declare(Set, state_gset),
+        % Declare variable :
 
-      Samples = 100,
-      % Len = erlang:length([ io:format("value over 1.0 ~p ~n",[Y]) 
-      Len = erlang:length([ Y 
-          || Y <- [ math:sqrt(math:pow(rand:uniform(),2) + math:pow(rand:uniform(),2))
-            || X <- lists:seq(1,Samples) ], Y > 1.0 ]),
-      
-      Node = erlang:node(),
-      InOut = {Node, (Samples - Len), Len},
-      Self = self(),
-      % io:format("Inner ~p Outer ~p ~n",[(Samples - Len),Len]),
-      % lasp:update(Set, {add, {node(), (Samples - Len), Len}, self()})
-      spawn(fun() -> 
-        Function = fun(V) -> io:format("stream ~p ~n", [V]) end
-        , lasp:stream(Set, Function)
-      end),
-      {ok, {Id, _, _, _}} = lasp:update(Set , {add , InOut} , self())
-  end,
-  % F = fun() ->
-      % V1 = {<<"inner_counter">>, state_gcounter},
-      % V2 = {<<"outer_counter">>, state_gcounter},
-      
-    % end,
-    Task = achlys:declare(mytask, all, single, F),
-    %% Send the task to the current server module
-    %% after a 3000ms delay
-    erlang:send_after(3000, ?SERVER, {task, Task}),
+        Type = state_gset,
+        Set = {<<"set">>, Type},
+        lasp:declare(Set, Type),
+
+        % Add listeners :
+
+        lasp:stream(Set, fun(S) ->
+            R = lists:foldl(fun(Current, Acc) ->
+                    case Current of #{n := N1, success := S1} ->
+                        case Acc of #{n := N2, success := S2} -> #{
+                            n => N1 + N2,
+                            success => S1 + S2
+                        }
+                        end
+                    end
+                end,
+                #{n => 0, success => 0},
+                sets:to_list(S)
+            ),
+            case R of #{n := N, success := Success} ->
+                io:format("Grow Only Set : ~p~n", [S]),
+                io:format("Results: ~p~n", [R]),
+                io:format("PI ≃ ~p~n", [4 * Success / N])
+            end
+        end),
+
+        % Helper functions :
+
+        GetRandomPoint = fun() -> {
+            rand:uniform(),
+            rand:uniform()
+        } end,
+
+        GetDistance = fun(Point) -> 
+            case Point of {X, Y} ->
+                math:sqrt(X * X + Y * Y)
+            end
+        end,
+
+        % Sampling :
+
+        N = 450,
+        Success = lists:foldl(fun(_, Count) -> 
+            case GetDistance(GetRandomPoint()) of
+                Distance when Distance =< 1 -> Count + 1;
+                _ -> Count
+            end    
+        end, 0, lists:seq(1, N)),
+
+        % Update :
+
+        lasp:update(Set, {add, #{
+            n => N,
+            success => Success
+        }}, self())
+    end),
+
+    erlang:send_after(100, ?SERVER, {task, Task}),
     ok.
-    % lasp:stream(V1, fun(Inner) ->
-    %   {ok, Outer} = lasp:query(V2),
-    %   io:format("~p\n", [4 * (Inner / (Inner + Outer))])
-    % end),
 
-    % lasp:stream(V2, fun(Outer) ->
-    %     {ok, Inner} = lasp:query(V1),
-    %     io:format("~p\n", [4 * (Inner / (Inner + Outer))])
-    % end),
-    % lists:foreach(fun(_) -> 
-    %   Point = getRandomPoint(),
-    %   Distance = getDistanceFromOrigin(Point),
-    %   if
-    %     (Distance > 1) ->
-    %       %% Here, we can increment the outer counter
-    %       lasp:update(V2, increment, self());
-    %     (Distance =< 1) ->
-    %       %% Here, we can increment the inner counter
-    %       lasp:update(V1, increment, self())
-    %   end
-    % end, lists:seq(1, 100))
-
-
-getDistanceFromOrigin(Point) ->
-  case Point of {X, Y} -> math:sqrt(X * X + Y * Y) end.
-
-getRandomPoint() -> {
-  rand:uniform(),
-  rand:uniform()
-}.
+debug() ->
+    Set = achlys_util:query({<<"set">>, state_gset}),
+    io:format("Set: ~p~n", [Set]).
