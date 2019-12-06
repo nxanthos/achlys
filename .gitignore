@@ -47,6 +47,8 @@ achlys-0\.3\.0/
 
 achlys-0\.3\.2/
 
+achlys-0\.3\.3/
+
 logs/
 
 grisp/
@@ -66,3 +68,5 @@ rebar.lock
 default.env
 
 rebarconfig.json
+
+achlys-0.3.3.tar.gz
