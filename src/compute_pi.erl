@@ -44,6 +44,30 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok , State}.
 
+% Handler :
+
+getDistance(Point) ->
+    case Point of {X, Y} ->
+        math:sqrt(X * X + Y * Y)
+    end.
+
+getRandomPoint() -> {
+    rand:uniform(),
+    rand:uniform()
+}.
+
+loop(N) ->
+    loop(N, 0).
+loop(N, Acc) ->
+    case N of
+        _ when N > 0 ->
+            case getDistance(getRandomPoint()) of
+                Distance when Distance =< 1 -> loop(N - 1, Acc + 1);
+                _ -> loop(N - 1, Acc)
+            end;
+        _ when N =< 0 -> Acc
+    end.
+
 schedule_task() ->
     Task = achlys:declare(mytask, all, single, fun() ->
 
@@ -77,26 +101,8 @@ schedule_task() ->
 
         % Helper functions :
 
-        GetRandomPoint = fun() -> {
-            rand:uniform(),
-            rand:uniform()
-        } end,
-
-        GetDistance = fun(Point) -> 
-            case Point of {X, Y} ->
-                math:sqrt(X * X + Y * Y)
-            end
-        end,
-
-        % Sampling :
-
-        N = 450,
-        Success = lists:foldl(fun(_, Count) -> 
-            case GetDistance(GetRandomPoint()) of
-                Distance when Distance =< 1 -> Count + 1;
-                _ -> Count
-            end    
-        end, 0, lists:seq(1, N)),
+        N = 5000,
+        Success = loop(N),
 
         % Update :
 
