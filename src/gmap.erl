@@ -59,6 +59,39 @@ choice(List) ->
     Index = rand:uniform(Length),
     lists:nth(Index, List).
 
+derivative(Point, Intercept, Slope) ->
+    derivative(Point, Intercept, Slope, 0.01).
+
+derivative(Point, Intercept, Slope, LearningRate) ->
+    {X,Y} = Point,
+    % Derivative with respect of Intercept
+    DIntercept = -2 * (Y - (Intercept + Slope * X)),
+    StepSizeI = DIntercept * LearningRate,
+    NewIntercept = Intercept - StepSizeI,
+
+    % Derivative with respect of Slope
+    DSlope = -2 * X * (Y - (Intercept + Slope * X)),
+    StepSizeS = DSlope * LearningRate,
+    NewSlope = Slope - StepSizeS,
+
+    timer:sleep(200),
+    % derivative(NewPoint, NewIntercept, NewSlope, LearningRate, N-1)
+    {NewIntercept, NewSlope}.
+
+addInterceptInMap(Intercept) ->
+    KeyI = <<"intercept">>,
+    ValI = Intercept,
+    lasp:update({<<"gmap">>, {state_gmap, [state_lwwregister]}}, {
+        apply, KeyI, {set, timestamp(), ValI}
+    }, self()).
+
+addSlopeInMap(Slope) ->
+    KeyS = <<"slope">>,
+    ValS = Slope,
+    lasp:update({<<"gmap">>, {state_gmap, [state_lwwregister]}}, {
+        apply, KeyS, {set, timestamp(), ValS}
+    }, self()).
+
 % Producer & Consumer :
 
 producer(N) ->
@@ -67,19 +100,37 @@ producer(N) ->
         _ when N > 0 ->
             Set = {<<"gset">>, state_gset},
             case generatePoint(1, 5) of Point ->
-                % io:format("~p~n", [Point])
+                % io:format("Point: ~p~n", [Point]),
                 lasp:update(Set, {add, Point}, self())
             end,
-            timer:sleep(1000),
+            % timer:sleep(1000),
             producer(N - 1)
     end.
 
 consumer() ->
-    Set = achlys_util:query({<<"gset">>, state_gset}),
-    Sample = choice(Set),
-    io:format("~p~n", [Sample]),
-    timer:sleep(1000),
-    consumer().
+    consumer(0, 1, 100).
+
+consumer(Intercept, Slope, N) ->
+    case N of
+        _ when N =< 0 -> ok;
+        _ when N > 0 ->
+            io:format("{Intercept, Slope}= ~p~n", [{Intercept, Slope}]),
+            Set = achlys_util:query({<<"gset">>, state_gset}),
+            Sample = choice(Set), % Random point
+            {NewIntercept, NewSlope} = derivative(Sample, Intercept, Slope),
+            % add intercept in Map
+            addInterceptInMap(NewIntercept),
+            % add slope in Map
+            addSlopeInMap(NewSlope),
+
+            {_, Map} = lasp:query({<<"gmap">>, {state_gmap, [state_lwwregister]}}),
+            GetIntercept = lists:keysearch(<<"intercept">>, 1, Map),
+            {_,{_,I}} = GetIntercept,
+            GetSlope = lists:keysearch(<<"slope">>, 1, Map), 
+            {_,{_,S}} = GetSlope,
+            io:format("{Intercept, Slope} = ~p~n", [{I, S}]),
+            consumer(I, S, N-1)
+    end.
 
 schedule_task() ->
     Task = achlys:declare(mytask, all, single, fun() ->
@@ -95,7 +146,7 @@ schedule_task() ->
         % Producer :
 
         spawn(fun() ->
-           producer(10)
+           producer(1000)
         end),
 
         % Consumer :
@@ -103,21 +154,13 @@ schedule_task() ->
         spawn(fun() ->
             consumer()
         end)
-
-        % Key = <<"thing">>,
-        % GMapVal = #{
-        %     what => i_am_a_gmap_value
-        % },
-        % lasp:update(GMap, {
-        %     apply, Key, {set, timestamp(), GMapVal}
-        % }, self())
     end),
 
     erlang:send_after(100, ?SERVER, {task, Task}),
     ok.
 
 debug() ->
-    Set = achlys_util:query({<<"gset">>, state_gset}),
+    % Set = achlys_util:query({<<"gset">>, state_gset}),
     Map = lasp:query({<<"gmap">>, {state_gmap, [state_lwwregister]}}),
-    io:format("Set: ~p~n", [Set]),
+    % io:format("Set: ~p~n", [Set]),
     io:format("Map: ~p~n", [Map]).
