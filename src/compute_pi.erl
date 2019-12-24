@@ -56,17 +56,25 @@ getRandomPoint() -> {
     rand:uniform()
 }.
 
-loop(N) ->
-    loop(N, 0).
-loop(N, Acc) ->
+sampling(N) ->
+    sampling(N, 0).
+sampling(N, Acc) ->
     case N of
         _ when N > 0 ->
             case getDistance(getRandomPoint()) of
-                Distance when Distance =< 1 -> loop(N - 1, Acc + 1);
-                _ -> loop(N - 1, Acc)
+                Distance when Distance =< 1 -> sampling(N - 1, Acc + 1);
+                _ -> sampling(N - 1, Acc)
             end;
         _ when N =< 0 -> Acc
     end.
+
+add_sampling(Set) ->
+    N = 5000,
+    Success = sampling(N),
+    lasp:update(Set, {add, #{
+        n => N,
+        success => Success
+    }}, self()).
 
 schedule_task() ->
     Task = achlys:declare(mytask, all, single, fun() ->
@@ -77,39 +85,39 @@ schedule_task() ->
         Set = {<<"set">>, Type},
         lasp:declare(Set, Type),
 
-        % Add listeners :
+        % Sampling :
 
-        lasp:stream(Set, fun(S) ->
-            R = lists:foldl(fun(Current, Acc) ->
-                    case Current of #{n := N1, success := S1} ->
-                        case Acc of #{n := N2, success := S2} -> #{
-                            n => N1 + N2,
-                            success => S1 + S2
-                        }
-                        end
-                    end
-                end,
-                #{n => 0, success => 0},
-                sets:to_list(S)
-            ),
-            case R of #{n := N, success := Success} ->
-                io:format("Grow Only Set : ~p~n", [S]),
-                io:format("Results: ~p~n", [R]),
-                io:format("PI ≃ ~p~n", [4 * Success / N])
+        add_sampling(Set),
+        add_sampling(Set),
+        add_sampling(Set),
+
+        % Map reduce :
+
+        achlys_view:start_link(),
+        achlys_view:add_listener(fun(Results) ->
+            io:format("Reduce : ~p~n", [Results])
+        end),
+
+        achlys_view:add_variable(Set, fun(Variable) -> % Map function
+            {ok , S} = lasp:query(Variable),
+            lists:map(fun(Sample) ->
+                case Sample of #{n := _, success := _} -> % Filter
+                    { "sample", Sample } % emit { Key, Value }
+                end
+            end, sets:to_list(S))
+        end),
+
+        achlys_view:set_reduce(fun(V1, V2) -> % Reduce function
+            case V1 of #{n := N1, success := S1} ->
+                case V2 of #{n := N2, success := S2} -> #{
+                    n => N1 + N2,
+                    success => S1 + S2
+                }
+                end
             end
         end),
 
-        % Helper functions :
-
-        N = 5000,
-        Success = loop(N),
-
-        % Update :
-
-        lasp:update(Set, {add, #{
-            n => N,
-            success => Success
-        }}, self())
+        achlys_view:debug()
     end),
 
     erlang:send_after(100, ?SERVER, {task, Task}),
