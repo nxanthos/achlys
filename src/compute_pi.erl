@@ -56,60 +56,124 @@ getRandomPoint() -> {
     rand:uniform()
 }.
 
-loop(N) ->
-    loop(N, 0).
-loop(N, Acc) ->
+sampling(N) ->
+    sampling(N, 0).
+sampling(N, Acc) ->
     case N of
         _ when N > 0 ->
             case getDistance(getRandomPoint()) of
-                Distance when Distance =< 1 -> loop(N - 1, Acc + 1);
-                _ -> loop(N - 1, Acc)
+                Distance when Distance =< 1 -> sampling(N - 1, Acc + 1);
+                _ -> sampling(N - 1, Acc)
             end;
         _ when N =< 0 -> Acc
     end.
 
+add_sampling(Set) ->
+    N = 5000,
+    Success = sampling(N),
+    lasp:update(Set, {add, #{
+        n => N,
+        success => Success
+    }}, self()).
+
+get_delta(Set_1) ->
+
+    % {ID, Type, Metadata, {_, Value}} = Set_1,
+    % io:format("=======================~n"),
+    % io:format("ID:~p~n", [ID]),
+    % io:format("Type:~p~n", [Type]),
+    % io:format("Metadata:~p~n", [Metadata]),
+    % io:format("Value:~p~n", [Value]),
+    % io:format("=======================~n"),
+    % io:format("Get delta:~n"),
+
+    % Documentation:
+    % see ctrl + p -> _build/test/lib/types/src/state_type.erl
+
+    % Examples:
+    % A = {state_gset, ["a", "b", "c"]},
+    % B = {state, {state_gset, ["a", "b"]}},
+    % Delta = state_gset:delta(A, B),
+    % io:format("delta=~p~n", [Delta]).
+
+    % Compare the states:
+    % A = {state_gset, ["a", "b"]},
+    % B = {state, {state_gset, Value}},
+    % Delta = lasp_type:delta(Type, A, B),
+    % io:format("delta=~p~n", [Delta]).
+
+    {ID_1, _, _, _} = Set_1,
+    {ok, Value_1} = lasp:query(ID_1),
+
+    % We perform an update:
+
+    {ok, Set_2} = lasp:update(ID_1, {add, #{
+        n => 1,
+        success => 1
+    }}, self()),
+    {ID_2, _, _, _} = Set_2,
+    {ok, Value_2} = lasp:query(ID_2),
+
+    io:format("=======================~n"),
+    io:format("~p~n", [Set_1]),
+    io:format("~p~n", [Set_2]),
+
+    % We compare the results:
+
+    Type = state_gset,
+    A = {Type, sets:to_list(Value_2)},
+    B = {state, {Type, sets:to_list(Value_1)}},
+    Delta = lasp_type:delta(Type, A, B),
+
+    io:format("delta=[~p]~n", [Delta]),
+    io:format("=======================~n").
+
 schedule_task() ->
+
     Task = achlys:declare(mytask, all, single, fun() ->
 
         % Declare variable :
 
         Type = state_gset,
-        Set = {<<"set">>, Type},
-        lasp:declare(Set, Type),
+        ID = {<<"set">>, Type},
+        lasp:declare(ID, Type),
+        % {ok, Set} = lasp:declare(ID, Type),
+        % get_delta(Set),
 
-        % Add listeners :
+        % Producer :
 
-        lasp:stream(Set, fun(S) ->
-            R = lists:foldl(fun(Current, Acc) ->
-                    case Current of #{n := N1, success := S1} ->
-                        case Acc of #{n := N2, success := S2} -> #{
-                            n => N1 + N2,
-                            success => S1 + S2
-                        }
-                        end
-                    end
-                end,
-                #{n => 0, success => 0},
-                sets:to_list(S)
-            ),
-            case R of #{n := N, success := Success} ->
-                io:format("Grow Only Set : ~p~n", [S]),
-                io:format("Results: ~p~n", [R]),
-                io:format("PI ≃ ~p~n", [4 * Success / N])
+        spawn(fun() ->
+            achlys_util:repeat(30, fun(_) ->
+                timer:sleep(1000),
+                add_sampling(ID)
+            end)
+        end),
+        
+        % Consumer :
+
+        % Listener
+        achlys_view:add_listener("get-samples", fun(Results) ->
+            io:format("Reduce : ~p~n", [Results])
+        end),
+
+        % Map function
+        achlys_view:map("get-samples", ID, fun(Value, Emit) ->
+            case Value of #{n := _, success := _} ->
+                Emit("sample", Value)
             end
         end),
 
-        % Helper functions :
+        % Reduce function
+        achlys_view:reduce("get-samples", fun(V1, V2) ->
+            case V1 of #{n := N1, success := S1} ->
+                case V2 of #{n := N2, success := S2} -> #{
+                    n => N1 + N2,
+                    success => S1 + S2
+                }
+                end
+            end
+        end)
 
-        N = 5000,
-        Success = loop(N),
-
-        % Update :
-
-        lasp:update(Set, {add, #{
-            n => N,
-            success => Success
-        }}, self())
     end),
 
     erlang:send_after(100, ?SERVER, {task, Task}),
