@@ -93,8 +93,6 @@
 -export([join/1]).
 -export([gc/0]).
 -export([flush/1]).
--export([join_host/1]).
-
 
 %%====================================================================
 %% Type definitions
@@ -103,9 +101,6 @@
 %%====================================================================
 %% Macros
 %%====================================================================
-
--define(MANAGER,    partisan_hyparview_peer_service_manager).
--define(LPS,    lasp_peer_service).
 
 %% ===================================================================
 %% Entry point functions
@@ -162,12 +157,27 @@ get_all_tasks() ->
 %% The variable <em>Task</em> is now named `mytask',
 %% is intended to run on all nodes in the cluster, and
 %% will run function F in permanent cycles.
+%% @doc Returns the task model variable based on the given arguments
+%% in the form of a map.
 -spec declare(Name::atom()
     , Targets::[node()] | all
     , ExecType::single | permanent
-    , Func::function()) -> task() | erlang:exception().
-declare(Name, Targets, ExecType, Func) ->
-    achlys_util:declare(Name, Targets, ExecType, Func).
+    , Func::function()) -> achlys:task().
+declare(Name, all, permanent, Func) ->
+    #{name => Name
+    , targets => task_flag(all)
+    , execution_type => task_flag(permanent)
+    , function => Func};
+declare(Name, all, single, Func) ->
+    #{name => Name
+    , targets => task_flag(all)
+    , execution_type => task_flag(single)
+    , function => Func};
+declare(Name, Targets, permanent, Func) when is_list(Targets) ->
+    #{name => Name
+    , targets => Targets
+    , execution_type => task_flag(permanent)
+    , function => Func}.
 
 -spec rainbow() -> erlang:function().
 rainbow() ->
@@ -265,15 +275,17 @@ bite(Task) ->
     achlys_task_server:add_task(Task).
 
 %% @doc Attempts to discover and join other neighboring nodes.
--spec clusterize() -> [atom()].
+% -spec clusterize() -> [atom()].
+-spec clusterize() -> ok.
 clusterize() ->
     logger:log(notice , "Cluster formation attempt ~n") ,
-    N = seek_neighbors() ,
-    Remotes = binary_remotes_to_atoms(N) ,
-    Reachable = [R || R <- Remotes
-        ,        R =/= node()
-        ,        net_adm:ping(R) =:= pong] ,
-    clusterize(Reachable).
+    achlys_squadron_leader:formation().
+    % N = seek_neighbors() ,
+    % Remotes = binary_remotes_to_atoms(N) ,
+    % Reachable = [R || R <- Remotes
+    %     ,        R =/= node()
+    %     ,        net_adm:ping(R) =:= pong] ,
+    % clusterize(Reachable).
 
 %% @doc Form Lasp cluster without attempting to ping neighbors beforehand.
 -spec contagion() -> {ok, []} | {ok, [map()]}.
@@ -373,10 +385,11 @@ join(Host) ->
         ok ->
             {ok, Host};
         {error, Reason} ->
-            logger:log(warning , "Failed lasp_peer_service join for : ~p ~nReason : ~p ~n" , [Host, Reason]) ,
+            logger:log(warning 
+            , "Failed lasp_peer_service join for : ~p ~nReason : ~p ~n" 
+            , [Host, Reason]) ,
             {error, Reason, Host}
-     end.
-
+    end.
 
 %% @private
 bidirectional_join(Host) ->
@@ -411,17 +424,17 @@ bidirectional_join(Host) ->
     Node.
 
 %% @private
-clusterize([H | Remotes]) ->
-    case join(H) of
-        {ok , N} ->
-            [N | clusterize(Remotes)];
-        _ ->
-            logger:log(warning , "Failed to join : ~p ~n" , [H]) ,
-            clusterize(Remotes)
-    end;
+% clusterize([H | Remotes]) ->
+%     case join(H) of
+%         {ok , N} ->
+%             [N | clusterize(Remotes)];
+%         _ ->
+%             logger:log(warning , "Failed to join : ~p ~n" , [H]) ,
+%             clusterize(Remotes)
+%     end;
 
-clusterize([]) ->
-    [].
+% clusterize([]) ->
+%     [].
 
 %% @doc
 %% Returns the local view of the Lasp
@@ -434,7 +447,9 @@ members() ->
 %% @doc
 %% Performs a VM-wide garbage collection.
 gc() ->
-    achlys_util:do_gc().
+    _ = [erlang:garbage_collect(X , [{type , 'major'}]) 
+        || X <- erlang:processes()] ,
+    ok.
 
 %% @private
 flush(Name) ->
@@ -444,5 +459,11 @@ flush(Name) ->
         , self()).
 
 %% @private
-join_host(Host) ->
-    lasp_peer_service:join(Host).
+task_flag(all) ->
+    <<0>>;
+task_flag(permanent) ->
+    <<0>>;
+task_flag(single) ->
+    <<1>>;
+task_flag(Args) ->
+    Args.

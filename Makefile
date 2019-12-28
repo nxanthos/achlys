@@ -43,8 +43,6 @@ endif
 
 .PHONY: all compile checkrebar3 snameshell shell erlshell docs test dialyzer cover release package tar clean relclean push upbar addemu deploy cacheclean build upgrade tree
 
-
-
 all: test docs package
 
 checkrebar3:
@@ -83,8 +81,7 @@ deploy:
 	$(PRE) \
         export NAME=$(NAME) && \
         export PEER_IP=$(PEER_IP) && \
-	export IP=$(IP) && \
-        echo "PEER_IP=$(PEER_IP)" > $(CURDIR)/default.env && \
+		export IP=$(IP) && \
 	    $(REBAR) grisp deploy -n $(GRISPAPP) -v $(VERSION)
 
 erlshell:
