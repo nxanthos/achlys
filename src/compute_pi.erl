@@ -44,7 +44,7 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok , State}.
 
-% Handler :
+% Helpers :
 
 getDistance(Point) ->
     case Point of {X, Y} ->
@@ -56,16 +56,12 @@ getRandomPoint() -> {
     rand:uniform()
 }.
 
-sampling(N) ->
-    sampling(N, 0).
-sampling(N, Acc) ->
-    case N of
-        _ when N > 0 ->
-            case getDistance(getRandomPoint()) of
-                Distance when Distance =< 1 -> sampling(N - 1, Acc + 1);
-                _ -> sampling(N - 1, Acc)
-            end;
-        _ when N =< 0 -> Acc
+sampling(N) -> sampling(N, 0).
+sampling(N, Acc) when N =< 0 -> Acc;
+sampling(N, Acc) when N > 0 ->
+    case getDistance(getRandomPoint()) of
+        Distance when Distance =< 1 -> sampling(N - 1, Acc + 1);
+        _ -> sampling(N - 1, Acc)
     end.
 
 add_sampling(Set) ->
@@ -76,58 +72,6 @@ add_sampling(Set) ->
         success => Success
     }}, self()).
 
-get_delta(Set_1) ->
-
-    % {ID, Type, Metadata, {_, Value}} = Set_1,
-    % io:format("=======================~n"),
-    % io:format("ID:~p~n", [ID]),
-    % io:format("Type:~p~n", [Type]),
-    % io:format("Metadata:~p~n", [Metadata]),
-    % io:format("Value:~p~n", [Value]),
-    % io:format("=======================~n"),
-    % io:format("Get delta:~n"),
-
-    % Documentation:
-    % see ctrl + p -> _build/test/lib/types/src/state_type.erl
-
-    % Examples:
-    % A = {state_gset, ["a", "b", "c"]},
-    % B = {state, {state_gset, ["a", "b"]}},
-    % Delta = state_gset:delta(A, B),
-    % io:format("delta=~p~n", [Delta]).
-
-    % Compare the states:
-    % A = {state_gset, ["a", "b"]},
-    % B = {state, {state_gset, Value}},
-    % Delta = lasp_type:delta(Type, A, B),
-    % io:format("delta=~p~n", [Delta]).
-
-    {ID_1, _, _, _} = Set_1,
-    {ok, Value_1} = lasp:query(ID_1),
-
-    % We perform an update:
-
-    {ok, Set_2} = lasp:update(ID_1, {add, #{
-        n => 1,
-        success => 1
-    }}, self()),
-    {ID_2, _, _, _} = Set_2,
-    {ok, Value_2} = lasp:query(ID_2),
-
-    io:format("=======================~n"),
-    io:format("~p~n", [Set_1]),
-    io:format("~p~n", [Set_2]),
-
-    % We compare the results:
-
-    Type = state_gset,
-    A = {Type, sets:to_list(Value_2)},
-    B = {state, {Type, sets:to_list(Value_1)}},
-    Delta = lasp_type:delta(Type, A, B),
-
-    io:format("delta=[~p]~n", [Delta]),
-    io:format("=======================~n").
-
 schedule_task() ->
 
     Task = achlys:declare(mytask, all, single, fun() ->
@@ -137,8 +81,6 @@ schedule_task() ->
         Type = state_gset,
         ID = {<<"set">>, Type},
         lasp:declare(ID, Type),
-        % {ok, Set} = lasp:declare(ID, Type),
-        % get_delta(Set),
 
         % Producer :
 
@@ -151,20 +93,7 @@ schedule_task() ->
         
         % Consumer :
 
-        % Listener
-        achlys_view:add_listener("get-samples", fun(Results) ->
-            io:format("Reduce : ~p~n", [Results])
-        end),
-
-        % Map function
-        achlys_view:map("get-samples", ID, fun(Value, Emit) ->
-            case Value of #{n := _, success := _} ->
-                Emit("sample", Value)
-            end
-        end),
-
-        % Reduce function
-        achlys_view:reduce("get-samples", fun(V1, V2) ->
+        Reducer = fun(V1, V2) ->
             case V1 of #{n := N1, success := S1} ->
                 case V2 of #{n := N2, success := S2} -> #{
                     n => N1 + N2,
@@ -172,8 +101,23 @@ schedule_task() ->
                 }
                 end
             end
-        end)
+        end,
 
+        Acc = #{ n => 0, success => 0 },
+
+        Callback = fun(Result) ->
+            io:format("Result: ~p~n", [Result]),
+            case Result of #{n := N, success := Success} ->
+                io:format("PI ≃ ~p~n", [4 * Success / N])
+            end
+        end,
+
+        achlys_stream_reducer:reduce(
+            ID,
+            Reducer,
+            Acc,
+            Callback
+        )
     end),
 
     erlang:send_after(100, ?SERVER, {task, Task}),
