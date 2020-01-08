@@ -39,12 +39,10 @@ gc_info() ->
 
 repeat(N, CallBack) ->
     repeat(0, N, CallBack).
-repeat(K, N, CallBack) ->
-    case N of _ when N > 0 ->
-        CallBack(K),
-        repeat(K + 1, N - 1, CallBack);
-    _ -> ok
-    end.
+repeat(K, N, CallBack) when N > 0 ->
+    CallBack(K),
+    repeat(K + 1, N - 1, CallBack);
+repeat(_, N, _) when N =< 0 -> ok.
 
 read_temp() ->
     pmod_nav:read(acc , [out_temp]).

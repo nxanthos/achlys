@@ -67,7 +67,7 @@ start(_StartType , _StartArgs) ->
             % initiate_sensors(),
             % spawn(achlys, light_percentage, []),
 
-            spawn(compute_pi, start_link, []),
+            % spawn(compute_pi, start_link, []),
             % spawn(gmap, start_link, []).
 
             {ok , Pid};

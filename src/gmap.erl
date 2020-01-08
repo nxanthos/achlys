@@ -99,7 +99,7 @@ producer(N) ->
         _ when N =< 0 -> ok;
         _ when N > 0 ->
             Set = {<<"gset">>, state_gset},
-            case generatePoint(1, 5) of Point ->
+            case generatePoint(2, 5) of Point ->
                 % io:format("Point: ~p~n", [Point]),
                 lasp:update(Set, {add, Point}, self())
             end,
@@ -108,7 +108,7 @@ producer(N) ->
     end.
 
 consumer() ->
-    consumer(0, 1, 100).
+    consumer(0, 1, 1000).
 
 consumer(Intercept, Slope, N) ->
     case N of
