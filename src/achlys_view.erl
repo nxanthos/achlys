@@ -9,8 +9,6 @@
     handle_call/3
 ]).
 
-% API:
-
 -export([
     map/3,
     reduce/2,
@@ -25,97 +23,95 @@ start_link() ->
 
 init([]) ->
     {ok, #{
-        pairs => [],
         listeners => [],
-        variables => #{}
+        variables => #{},
+        tree => #{
+            mapping => #{},
+            roots => #{},
+            nodes => #{}
+        }
     }}.
 
 % Cast:
 
 handle_cast({map, ID, Fun}, State) ->
-    {Name, _} = ID,
-    Key = erlang:binary_to_list(Name),
     case State of #{variables := Variables} ->
         lasp:stream(ID, fun(Values) ->
             gen_server:cast(?SERVER, {on_change, ID, Values})
         end),
-        {noreply, State#{
-            variables := maps:put(Key, #{
-                last_values => [],
-                map => Fun
-            }, Variables)
-        }}
-    end;
-
-handle_cast({emit, Key, Value}, State) ->
-    io:format("key=~p value=~p~n", [Key, Value]),
-    {noreply, State};
-
-handle_cast({reduce, Fun}, State) ->
-    case State of #{pairs := Pairs, listeners := Listeners} ->
-        Groups = shuffle_phase(Pairs),
-        Results = maps:fold(fun(Key, Values, Acc) ->
-            maps:put(Key, reduce_phase(Values, Fun), Acc)
-        end, #{}, Groups),
-        lists:foreach(fun(Listener) ->
-            Listener(Results)
-        end, Listeners)
-    end,
-    {noreply, State};
-
-handle_cast({add_listener, Listener}, State) ->
-    case State of #{listeners := Listeners} ->
-        {noreply, State#{
-            listeners := Listeners ++ [Listener]
-        }}
+        {Name, _} = ID,
+        Key = erlang:binary_to_list(Name),
+        {noreply, mapz:deep_put(
+            [variables, Key],
+            #{last_values => [], map => Fun},
+            State
+        )}
     end;
 
 handle_cast({on_change, ID, Values}, State) ->
-    case State of #{variables := Variables} ->
-        {Name, Type} = ID,
-        Key = erlang:binary_to_list(Name),
-        Variable = maps:get(Key, Variables),
-        New_values = lists:sort(sets:to_list(Values)),
-        case Variable of #{last_values := Last_values, map := Fun} ->
-            A = {Type, New_values},
-            B = {state, {Type, Last_values}},
-            {_, Delta} = lasp_type:delta(Type, A, B),
-            map_phase(Delta, Fun),
-            {noreply, State#{
-                variables := maps:put(Key, Variable#{
-                    last_values := New_values
-                }, Variables)
-            }}
-        end
+    case maps:is_key(reduce, State) of
+        true ->
+            case State of #{variables := Variables} ->
+                {Name, Type} = ID,
+                Key = erlang:binary_to_list(Name),
+                Variable = maps:get(Key, Variables),
+                case Variable of #{last_values := Last_values, map := Fun} ->
+                    % Delta = sets:subtract(Values, Last_values),
+                    % io:format("~p~n", [Delta]),
+                    % map_phase(Delta, Fun),
+                    map_phase([], Fun),
+                    notify(),
+                    {noreply, mapz:deep_put(
+                        [variables, Key, last_values],
+                        Values,
+                        State
+                    )}
+                end
+            end;
+        false -> {noreply, State}
     end;
 
+handle_cast({emit, Key, Value}, State) ->
+    % io:format("key=~p value=~p~n", [Key, Value]),
+    case State of #{tree := Tree, reduce := Reduce} ->
+        Updated_Tree = achlys_ct:add(Tree, {Key, Value}, Reduce),
+        {noreply, maps:update(
+            tree,
+            Updated_Tree,
+            State
+        )}
+    end;
+
+handle_cast({reduce, Fun}, State) ->
+    {noreply, maps:put(reduce, Fun, State)};
+
+handle_cast({add_listener, Listener}, State) ->
+    case State of #{listeners := Listeners} ->
+        {noreply, maps:update(
+            listeners,
+            [Listener|Listeners],
+            State
+        )}
+    end;
+
+handle_cast(notify, State) ->
+    % case State of #{tree := Tree, listeners := Listeners} ->
+    %     lists:foreach(fun(Listener) ->
+    %         erlang:apply(Listener, achlys_ct:get_all(Tree))
+    %     end, Listeners),
+    % end;
+    {noreply, State};
+
 handle_cast(debug, State) ->
-    io:format("~p~n", ["Debugging"]),
-    case State of #{last_values := Hashmap} ->
-        io:format("~p~n", [Hashmap]),
-        {noreply, State}
-    end.
+    io:format("State= ~p~n", [State]),
+    {noreply, State}.
 
 % Call:
 
-handle_call(_Request , _From , State) ->
+handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
 % Helpers:
-
-shuffle_phase(L) -> shuffle_phase(#{}, L).
-shuffle_phase(Groups, []) -> Groups;
-shuffle_phase(Groups, [{Key, Value}|T]) ->
-    case maps:is_key(Key, Groups) of
-        true ->
-            L = [Value|maps:get(Key, Groups)],
-            M = maps:put(Key, L, Groups),
-            shuffle_phase(M, T);
-        false ->
-            L = [Value],
-            M = maps:put(Key, L, Groups),
-            shuffle_phase(M, T)
-    end.
 
 map_phase([], _) -> ok;
 map_phase([H|T], Fun) ->
@@ -124,9 +120,8 @@ map_phase([H|T], Fun) ->
     end),
     map_phase(T, Fun).
 
-reduce_phase([H], _) -> H;
-reduce_phase([H1|[H2|T]], Fun) ->
-    reduce_phase([Fun(H1, H2)|T], Fun).
+notify() ->
+    gen_server:cast(?SERVER, notify).
 
 % API:
 
