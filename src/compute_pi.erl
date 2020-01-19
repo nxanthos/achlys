@@ -4,7 +4,10 @@
 
 -export([start_link/0]).
 -export([schedule_task/0]).
--export([start_achlys_stream_reducer/0]).
+-export([
+    start_achlys_stream_reducer/0,
+    start_achlys_map_reduce/0
+]).
 -export([debug/0]).
 -export([
     init/1 ,
@@ -121,6 +124,33 @@ schedule_task() ->
 
     erlang:send_after(100, ?SERVER, {task, Task}),
     ok.
+
+start_achlys_map_reduce() ->
+    
+    N = 10,
+    ID = {<<"set">>, state_gset},
+    lists:foreach(fun(K) ->
+        lasp:update(ID, {add, K}, self())
+    end, lists:seq(1, N)),
+    lasp:read(ID, {cardinality, N}),
+
+    achlys_map_reduce:start_link(),
+
+    % Map function
+    achlys_map_reduce:map("get-samples", ID, fun(Value) ->
+        [{sum, Value}]
+    end),
+
+    % Reduce function
+    achlys_map_reduce:reduce("get-samples", fun(P1, P2) ->
+        io:format("P1: ~p~n", [P1]),
+        io:format("P2: ~p~n", [P2]),
+        case {P1, P2} of {#{value := V1}, #{value := V2}} ->
+            {sum, V1 + V2}
+        end
+    end),
+
+    achlys_map_reduce:schedule().
 
 start_achlys_stream_reducer() ->
 
