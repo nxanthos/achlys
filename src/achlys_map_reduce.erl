@@ -15,7 +15,7 @@
     schedule/0,
     get_size/0,
     print_state/0,
-    debug/0
+    debug/1
 ]).
 
 start_link() ->
@@ -50,9 +50,35 @@ handle_cast({reduce, Fun}, State) ->
 
 handle_cast(schedule, State) ->
     case State of #{variables := Variables, function := Reduce} ->
-        Pairs = map_phase(Variables),
-        N = shuffle_phase(Pairs),
-        reduce_phase(N, Reduce),
+
+        Total = map_phase(Variables),
+        lasp:read({
+            <<"pairs">>,
+            state_twopset
+        }, {cardinality, Total}),
+
+        % debug("pairs"),
+        % io:format("Size=~p~n", [get_size()]),
+        
+        Round = 1,
+        Count = shuffle_phase(Round),
+        Keys = maps:keys(Count),
+
+        lists:foreach(fun(Key) ->
+            lasp:read({
+                get_input_var(Round, Key),
+                state_twopset
+            }, {
+                cardinality,
+                maps:get(Key, Count)
+            }),
+            N = reduce_phase(Round, Key, Reduce),
+            io:format("~p~n", [N])
+        end, Keys),
+
+        % Task = achlys:declare(mytask, all, single, fun() ->
+        % end),
+        % achlys:bite(Task),
         {noreply, State}
     end;
 
@@ -69,113 +95,117 @@ handle_call(Request, _From, State) ->
 
 % Helpers:
 
+get_input_var(Round, Key) ->
+    erlang:list_to_binary(
+        erlang:integer_to_list(Round) ++ "-" ++ erlang:atom_to_list(Key)
+    ).
+
+get_output_var(Round) ->
+    <<"ok">>.
+
 % Map phase :
 
-map_phase(Variables) -> map_phase(Variables, []).
-map_phase([], Pairs) -> Pairs;
-map_phase([Variable|Variables], Pairs) ->
-    case Variable of #{id := ID, function := Map} ->
-        {ok, Set} = lasp:query(ID),
-        List = sets:to_list(Set),
-        map_phase(Variables, lists:foldl(fun(Elem, Acc) ->
-            Pair = erlang:apply(Map, [Elem]),
-            Pair ++ Acc
-        end, Pairs, List))
+add_pair(Pair, ID) ->
+    case Pair of {Key, Value} ->
+        Name = <<"pairs">>,
+        lasp:update({Name, state_twopset}, {add, #{
+            id => ID,
+            key => Key,
+            value => Value
+        }}, self())
     end.
+
+map_phase(Variables) ->
+    lists:foldl(fun(Variable, Acc1) ->
+        case Variable of #{id := ID, function := Map} ->
+            {ok, Set} = lasp:query(ID),
+            Values = sets:to_list(Set),
+            lists:foldl(fun(Value, Acc2) ->
+                try
+                    Pairs = erlang:apply(Map, [Value]),
+                    lists:foldl(fun(Pair, Acc3) ->
+                        add_pair(Pair, Acc3),
+                        Acc3 + 1
+                    end, Acc2, Pairs)
+                catch _ -> Acc2 end
+            end, Acc1, Values)
+        end
+    end, 1, Variables) - 1.
 
 % Shuffle phase :
 
-shuffle_phase(Pairs) -> shuffle_phase(Pairs, 0).
-shuffle_phase([], K) -> K;
-shuffle_phase([Pair|Pairs], K) ->
-    case Pair of
-        {Key, Value} ->
-            ID = {<<"pairs">>, state_twopset},
-            lasp:update(ID, {add, #{
-                id => K,
-                key => Key,
-                value => Value
-            }}, self()),
-            shuffle_phase(Pairs, K + 1);
-        _ -> shuffle_phase(Pairs, K)
-    end.
+shuffle_phase(Round) ->
+    {ok, Set} = lasp:query({<<"pairs">>, state_twopset}),
+    lists:foldl(fun(Pair, Acc) ->
+        case Pair of #{key := Key} ->
+            Name = get_input_var(Round, Key), 
+            ID = {Name, state_twopset},
+            lasp:update(ID, {add, Pair}, self()),
+            maps:put(Key, maps:get(Key, Acc, 0) + 1, Acc)
+        end
+    end, #{}, sets:to_list(Set)).
 
 % Reduce phase :
 
-get_pairs() ->
-    {ok, Set} = lasp:query({<<"pairs">>, state_twopset}),
-    List = sets:to_list(Set),
-    lists:foldl(fun(Pair, Acc) ->
-        case Pair of #{id := ID, key := Key, value := Value} ->
-            maps:put(ID, #{
+extract_values([]) -> [];
+extract_values([Pair|Pairs]) ->
+    case Pair of #{value := Value} ->
+        [Value|extract_values(Pairs)]
+    end.
+
+get_max_id([]) -> none;
+get_max_id([Pair|Pairs]) ->
+    case Pair of #{id := ID} ->
+        get_max_id(Pairs, ID)
+    end.
+get_max_id([], Max) -> Max + 1;
+get_max_id([Pair|Pairs], Max) ->
+    case Pair of #{id := ID} ->
+        case ID > Max of
+            true -> get_max_id(Pairs, ID);
+            false -> get_max_id(Pairs, Max)
+        end
+    end.
+
+get_reduced_pairs(Reduce, Args) ->
+    Pairs = erlang:apply(Reduce, Args),
+    lists:sort(Pairs).
+
+add_reduced_pairs(_, [], {_, Index}) -> Index;
+add_reduced_pairs(Name, [Pair|Pairs], {Key, Index}) ->
+    case Pair of
+        {Key, Value} ->
+            ID = {Name, state_twopset},
+            lasp:update(ID, {add, #{
+                id => {Key, Index},
                 key => Key,
                 value => Value
-            }, Acc)
-        end
-    end, #{}, List).
-
-get_constraints(K) ->
-    get_constraints(lists:seq(0, K - 1), K).
-get_constraints(L, K) ->
-    case L of
-        [H1|[H2|T]] ->
-            Constraint = {{H1, H2}, K},
-            [Constraint|get_constraints(
-                T ++ [K],
-                K + 1
-            )];
-        [_|[]] -> [];
-        [] -> []
+            }}, self()),
+            add_reduced_pairs(Name, Pairs, {Key, Index + 1});
+        _ ->
+            add_reduced_pairs(Name, Pairs, {Key, Index})
     end.
 
-reduction_loop(Constraints, Reduce) ->
-    timer:sleep(rand:uniform(100)), % Simulate delay
-    Pairs = get_pairs(),
-    case maps:size(Pairs) of
-        Size when Size =< 1 ->
-            debug(),
-            ok;
-        Size when Size > 1 ->
-            reduction_step(Constraints, Pairs, Reduce),
-            reduction_loop(Constraints, Reduce)
-    end.
+reduce_phase(Round, Key, Reduce) ->
 
-reduction_step(Constraints, Pairs, Reduce) ->
-    ID = {<<"pairs">>, state_twopset},
-    case Constraints of
-        [{{A, B}, C}|T] ->
-            case {
-                maps:is_key(A, Pairs),
-                maps:is_key(B, Pairs)
-            } of {true, true} ->
-                P1 = maps:get(A, Pairs),
-                P2 = maps:get(B, Pairs),
-                {Key, Value} = erlang:apply(Reduce, [P1, P2]),
-                lasp:update(ID, {add, #{
-                    id => C,
-                    key => Key,
-                    value => Value
-                }}, self()),
-                lasp:update(ID, {rmv, maps:put(id, A, P1)}, self()),
-                lasp:update(ID, {rmv, maps:put(id, B, P2)}, self()),
-                io:format("Node left: ~p~n", [get_size()]);
-            _ -> reduction_step(T, Pairs, Reduce) end;
-        [] -> ok
-    end.
+    {ok, Set} = lasp:query({
+        get_input_var(Round, Key),
+        state_twopset
+    }),
 
-reduce_phase(N, Reduce) ->
-    Task = achlys:declare(mytask, all, single, fun() ->
-        io:format("Waiting convergence...~n"),
-        ID = {<<"pairs">>, state_twopset},
-        lasp:read(ID, {cardinality, N}),
-        debug(),
-        io:format("Size=~p~n", [get_size()]),
-        Constraints = get_constraints(N),
-        io:format("Constraints: ~p~n", [Constraints]),
-        io:format("Starting the task...~n"),
-        reduction_loop(Constraints, Reduce)
-    end),
-    achlys:bite(Task).
+    case sets:size(Set) of
+        Size when Size == 0 -> 0;
+        Size when Size > 0 ->
+            Pairs = sets:to_list(Set),
+            Values = extract_values(Pairs),
+            A = get_max_id(Pairs) + 1,
+            B = add_reduced_pairs(
+                <<"coucou">>,
+                get_reduced_pairs(Reduce, [Key, Values]),
+                {Key, A}
+            ),
+            B - A
+    end.
 
 % Debugging:
 
@@ -183,10 +213,14 @@ get_size() ->
     {ok, Set} = lasp:query({<<"pairs">>, state_twopset}),
     sets:size(Set).
 
-debug() ->
-    {ok, Set} = lasp:query({<<"pairs">>, state_twopset}),
-    Pairs = sets:to_list(Set),
-    io:format("Pairs: ~p~n", [Pairs]).
+debug(Name) ->
+    % io:format("~p~n", [erlang:list_to_binary(Name)]).
+    {ok, Set} = lasp:query({
+        erlang:list_to_binary(Name),
+        state_twopset
+    }),
+    Content = sets:to_list(Set),
+    io:format("Content: ~p~n", [Content]).
 
 % API:
 

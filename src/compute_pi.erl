@@ -142,12 +142,10 @@ start_achlys_map_reduce() ->
     end),
 
     % Reduce function
-    achlys_map_reduce:reduce("get-samples", fun(P1, P2) ->
-        io:format("P1: ~p~n", [P1]),
-        io:format("P2: ~p~n", [P2]),
-        case {P1, P2} of {#{value := V1}, #{value := V2}} ->
-            {sum, V1 + V2}
-        end
+    achlys_map_reduce:reduce("get-samples", fun(Key, Values) ->
+        [{sum, lists:foldl(fun(Value, Acc) ->
+            Value + Acc
+        end, 0, Values)}]
     end),
 
     achlys_map_reduce:schedule().
