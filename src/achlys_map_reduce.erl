@@ -1,237 +1,203 @@
 -module(achlys_map_reduce).
--behaviour(gen_server).
 -define(SERVER, ?MODULE).
 
 -export([
-    start_link/0,
-    init/1,
-    handle_cast/2,
-    handle_call/3
-]).
-
--export([
-    map/3,
-    reduce/2,
-    schedule/0,
+    schedule/2,
     get_size/0,
-    print_state/0,
     debug/1
 ]).
 
-start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
-
-init([]) ->
-    {ok, #{
-        variables => []
-    }}.
-
-% Cast:
-
-handle_cast({map, ID, Fun}, State) ->
-    case State of #{variables := Variables} ->
-        Variable = #{
-            id => ID,
-            function => Fun % Map function
-        },
-        {noreply, maps:put(
-            variables,
-            [Variable|Variables],
-            State
-        )}
-    end;
-
-handle_cast({reduce, Fun}, State) ->
-    {noreply, maps:put(
-        function,
-        Fun, % Reduce function
-        State
-    )};
-
-handle_cast(schedule, State) ->
-    case State of #{variables := Variables, function := Reduce} ->
-
-        Total = map_phase(Variables),
-        lasp:read({
-            <<"pairs">>,
-            state_twopset
-        }, {cardinality, Total}),
-
-        % debug("pairs"),
-        % io:format("Size=~p~n", [get_size()]),
-        
-        Round = 1,
-        Count = shuffle_phase(Round),
-        Keys = maps:keys(Count),
-
-        lists:foreach(fun(Key) ->
-            lasp:read({
-                get_input_var(Round, Key),
-                state_twopset
-            }, {
-                cardinality,
-                maps:get(Key, Count)
-            }),
-            N = reduce_phase(Round, Key, Reduce),
-            io:format("~p~n", [N])
-        end, Keys),
-
-        % Task = achlys:declare(mytask, all, single, fun() ->
-        % end),
-        % achlys:bite(Task),
-        {noreply, State}
-    end;
-
-handle_cast(debug, State) ->
-    {noreply, State};
-
-handle_cast(_, State) ->
-    {noreply, State}.
-
-% Call:
-
-handle_call(Request, _From, State) ->
-    {reply, ok, State}.
-
-% Helpers:
-
-get_input_var(Round, Key) ->
-    erlang:list_to_binary(
-        erlang:integer_to_list(Round) ++ "-" ++ erlang:atom_to_list(Key)
-    ).
-
-get_output_var(Round) ->
-    <<"ok">>.
-
+% ---------------------------------------------
 % Map phase :
+% ---------------------------------------------
 
-add_pair(Pair, ID) ->
-    case Pair of {Key, Value} ->
-        Name = <<"pairs">>,
-        lasp:update({Name, state_twopset}, {add, #{
-            id => ID,
-            key => Key,
-            value => Value
-        }}, self())
-    end.
+% @pre -
+% @post -
+add_pairs([], _, I) -> I;
+add_pairs([{Key, Value}|Pairs], OVar, I) ->
+    lasp:update(OVar, {add, #{
+        id => I,
+        key => Key,
+        value => Value
+    }}, self()),
+    add_pairs(Pairs, OVar, I + 1);
+add_pairs([_|Pairs], OVar, I) ->
+    add_pairs(Pairs, OVar, I).
 
-map_phase(Variables) ->
-    lists:foldl(fun(Variable, Acc1) ->
-        case Variable of #{id := ID, function := Map} ->
-            {ok, Set} = lasp:query(ID),
-            Values = sets:to_list(Set),
-            lists:foldl(fun(Value, Acc2) ->
-                try
-                    Pairs = erlang:apply(Map, [Value]),
-                    lists:foldl(fun(Pair, Acc3) ->
-                        add_pair(Pair, Acc3),
-                        Acc3 + 1
-                    end, Acc2, Pairs)
-                catch _ -> Acc2 end
-            end, Acc1, Values)
-        end
-    end, 1, Variables) - 1.
+% @pre -
+% @post -
+map_phase(Entries, OVar) ->
+    map_phase(Entries, OVar, 0).
+map_phase([], _, I) -> I;
+map_phase([{IVar, Map}|Entries], OVar, I) ->
+    Values = achlys_util:query(IVar),
+    Pairs = erlang:apply(Map, [Values]),
+    J = add_pairs(Pairs, OVar, I),
+    map_phase(Entries, OVar, J);
+map_phase([_|Entries], OVar, I) ->
+    map_phase(Entries, OVar, I).
 
+% ---------------------------------------------
 % Shuffle phase :
+% ---------------------------------------------
 
-shuffle_phase(Round) ->
-    {ok, Set} = lasp:query({<<"pairs">>, state_twopset}),
-    lists:foldl(fun(Pair, Acc) ->
-        case Pair of #{key := Key} ->
-            Name = get_input_var(Round, Key), 
-            ID = {Name, state_twopset},
-            lasp:update(ID, {add, Pair}, self()),
-            maps:put(Key, maps:get(Key, Acc, 0) + 1, Acc)
-        end
-    end, #{}, sets:to_list(Set)).
+% @pre -
+% @post -
+shuffle_pairs([], Counter, _) -> Counter;
+shuffle_pairs([Pair|Pairs], Counter, GetOVar) ->
+    case Pair of
+        #{key := Key} ->
+            OVar = GetOVar(Key),
+            lasp:update(OVar, {add, Pair}, self()),
+            #{n := N} = maps:get(Key, Counter, #{n => 0}),
+            shuffle_pairs(Pairs, maps:put(Key, #{
+                n => N + 1,
+                variable => OVar
+            }, Counter), GetOVar);
+        _ -> shuffle_pairs(Pairs, Counter, GetOVar)
+    end.
 
+% @pre -
+% @post -
+shuffle_phase(IVar, Round) ->
+    Pairs = achlys_util:query(IVar),
+    shuffle_pairs(Pairs, #{}, fun(Key) ->
+        A = erlang:integer_to_list(Round),
+        B = erlang:atom_to_list(Key),
+        C = erlang:list_to_binary(A ++ B),
+        {C, state_twopset}
+    end).
+
+% ---------------------------------------------
 % Reduce phase :
+% ---------------------------------------------
 
-extract_values([]) -> [];
-extract_values([Pair|Pairs]) ->
+% @pre -
+% @post -
+get_cardinalities([], Acc) -> Acc;
+get_cardinalities([{_, N}|Cardinalities], Acc) ->
+    get_cardinalities(Cardinalities, N + Acc).
+
+% @pre -
+% @post -
+get_values([]) -> [];
+get_values([Pair|Pairs]) ->
     case Pair of #{value := Value} ->
-        [Value|extract_values(Pairs)]
+        [Value|get_values(Pairs)]
     end.
 
-get_max_id([]) -> none;
-get_max_id([Pair|Pairs]) ->
-    case Pair of #{id := ID} ->
-        get_max_id(Pairs, ID)
+% @pre -
+% @post -
+get_unique_id([]) -> none;
+get_unique_id([Pair|Pairs]) ->
+    case Pair of
+        #{id := {_, N}} ->
+            get_unique_id(Pairs, N);
+        #{id := N} ->
+            get_unique_id(Pairs, N)
     end.
-get_max_id([], Max) -> Max + 1;
-get_max_id([Pair|Pairs], Max) ->
-    case Pair of #{id := ID} ->
-        case ID > Max of
-            true -> get_max_id(Pairs, ID);
-            false -> get_max_id(Pairs, Max)
-        end
+get_unique_id([], Acc) -> Acc + 1;
+get_unique_id([Pair|Pairs], Acc) ->
+    case Pair of
+        #{id := {_, N}} ->
+            get_unique_id(Pairs, erlang:max(N, Acc));
+        #{id := N} ->
+            get_unique_id(Pairs, erlang:max(N, Acc))
     end.
 
-get_reduced_pairs(Reduce, Args) ->
-    Pairs = erlang:apply(Reduce, Args),
-    lists:sort(Pairs).
-
-add_reduced_pairs(_, [], {_, Index}) -> Index;
-add_reduced_pairs(Name, [Pair|Pairs], {Key, Index}) ->
+% @pre -
+% @post -
+add_reduced_pairs(ID, Pairs, OVar) ->
+    add_reduced_pairs(ID, Pairs, OVar, 0).
+add_reduced_pairs(_, [], _, I) -> I;
+add_reduced_pairs(ID, [Pair|Pairs], OVar, I) ->
     case Pair of
         {Key, Value} ->
-            ID = {Name, state_twopset},
-            lasp:update(ID, {add, #{
-                id => {Key, Index},
+            lasp:update(OVar, {add, #{
+                id => ID,
                 key => Key,
                 value => Value
             }}, self()),
-            add_reduced_pairs(Name, Pairs, {Key, Index + 1});
-        _ ->
-            add_reduced_pairs(Name, Pairs, {Key, Index})
+            {Group, K} = ID,
+            add_reduced_pairs({Group, K + 1}, Pairs, OVar, I + 1);
+        _ -> add_reduced_pairs(ID, Pairs, OVar, I)
     end.
 
-reduce_phase(Round, Key, Reduce) ->
-
-    {ok, Set} = lasp:query({
-        get_input_var(Round, Key),
-        state_twopset
-    }),
-
+% @pre -
+% @post -
+reduce_phase(Key, IVar, Reduce, OVar) ->
+    {ok, Set} = lasp:query(IVar),
     case sets:size(Set) of
         Size when Size == 0 -> 0;
         Size when Size > 0 ->
-            Pairs = sets:to_list(Set),
-            Values = extract_values(Pairs),
-            A = get_max_id(Pairs) + 1,
-            B = add_reduced_pairs(
-                <<"coucou">>,
-                get_reduced_pairs(Reduce, [Key, Values]),
-                {Key, A}
-            ),
-            B - A
-    end.
+            P1 = sets:to_list(Set),
+            P2 = erlang:apply(Reduce, [Key, get_values(P1)]),
+            N = get_unique_id(P1),
+            io:format("P1=~p~n", [P1]),
+            io:format("P2=~p~n", [P2]),
+            add_reduced_pairs({Key, N}, P2, OVar)
+        end.
 
+% ---------------------------------------------
 % Debugging:
+% ---------------------------------------------
 
+% @pre -
+% @post -
 get_size() ->
     {ok, Set} = lasp:query({<<"pairs">>, state_twopset}),
     sets:size(Set).
 
+% @pre -
+% @post -
 debug(Name) ->
-    % io:format("~p~n", [erlang:list_to_binary(Name)]).
     {ok, Set} = lasp:query({
         erlang:list_to_binary(Name),
         state_twopset
     }),
     Content = sets:to_list(Set),
-    io:format("Content: ~p~n", [Content]).
+    io:format("Variable (~p) -> ~p~n", [Name, Content]).
 
+% ---------------------------------------------
 % API:
+% ---------------------------------------------
 
-map(Name, Variable, Map) ->
-    gen_server:cast(?SERVER, {map, Variable, Map}).
+% @pre -
+% @post -
+schedule(Entries, Reduce) ->
 
-reduce(Name, Reduce) ->
-    gen_server:cast(?SERVER, {reduce, Reduce}).
+    Total = map_phase(Entries, {
+        <<"pairs">>,
+        state_twopset
+    }),
 
-schedule() ->
-    gen_server:cast(?SERVER, schedule).
+    lasp:read(
+        {<<"pairs">>, state_twopset},
+        {cardinality, Total}
+    ),
 
-print_state() ->
-    gen_server:cast(?SERVER, debug).
+    % debug("pairs"),
+    % io:format("Total=~p~n", [Total]),
+    % io:format("Size=~p~n", [get_size()]),
+
+    Round = 1,
+    Counter = shuffle_phase({<<"pairs">>, state_twopset}, Round),
+    Keys = maps:keys(Counter),
+
+    io:format("Counter=~p~n", [Counter]),
+    io:format("Keys=~p~n", [Keys]),
+
+    lists:foreach(fun(Key) ->
+        case maps:is_key(Key, Counter) of true ->
+            #{variable := IVar, n := N} = maps:get(Key, Counter),
+            lasp:read(IVar, {cardinality, N}),
+
+            OVar = {<<"output">>, state_twopset},
+            M = reduce_phase(Key, IVar, Reduce, OVar),
+            
+            io:format("~p~n", [M]),
+            debug("output")
+            % lasp:read(OVar, {cardinality, M})
+        end
+    end, Keys),
+    ok.
