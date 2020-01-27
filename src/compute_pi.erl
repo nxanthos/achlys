@@ -126,7 +126,7 @@ schedule_task() ->
     ok.
 
 start_achlys_map_reduce() ->
-    
+
     N = 10,
     ID = {<<"set">>, state_gset},
     lists:foreach(fun(K) ->
@@ -134,21 +134,15 @@ start_achlys_map_reduce() ->
     end, lists:seq(1, N)),
     lasp:read(ID, {cardinality, N}),
 
-    achlys_map_reduce:start_link(),
-
-    % Map function
-    achlys_map_reduce:map("get-samples", ID, fun(Value) ->
-        [{sum, Value}]
-    end),
-
-    % Reduce function
-    achlys_map_reduce:reduce("get-samples", fun(Key, Values) ->
-        [{sum, lists:foldl(fun(Value, Acc) ->
+    achlys_map_reduce:schedule([
+        {ID, fun(Value) ->
+            [{sum, Value}]
+        end}
+    ], fun(Key, Values) ->
+        [{Key, lists:foldl(fun(Value, Acc) ->
             Value + Acc
         end, 0, Values)}]
-    end),
-
-    achlys_map_reduce:schedule().
+    end).
 
 start_achlys_stream_reducer() ->
 

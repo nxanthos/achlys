@@ -30,7 +30,9 @@ map_phase(Entries, OVar) ->
 map_phase([], _, I) -> I;
 map_phase([{IVar, Map}|Entries], OVar, I) ->
     Values = achlys_util:query(IVar),
-    Pairs = erlang:apply(Map, [Values]),
+    Pairs = lists:foldl(fun(Value, Acc) ->
+        Acc ++ erlang:apply(Map, [Value])
+    end, [], Values),
     J = add_pairs(Pairs, OVar, I),
     map_phase(Entries, OVar, J);
 map_phase([_|Entries], OVar, I) ->
@@ -113,6 +115,11 @@ add_reduced_pairs(ID, [Pair|Pairs], OVar, I) ->
 
 % @pre -
 % @post -
+sort_pairs(Pairs) when erlang:is_list(Pairs) -> lists:sort(Pairs);
+sort_pairs(Pair) when erlang:is_tuple(Pair) -> [Pair].
+
+% @pre -
+% @post -
 reduce_phase(Key, IVar, Reduce, OVar) ->
     {ok, Set} = lasp:query(IVar),
     case sets:size(Set) of
@@ -121,7 +128,7 @@ reduce_phase(Key, IVar, Reduce, OVar) ->
             P1 = sets:to_list(Set),
             P2 = erlang:apply(Reduce, [Key, get_values(P1)]),
             N = get_unique_id(P1),
-            add_reduced_pairs({Key, N}, P2, OVar)
+            add_reduced_pairs({Key, N}, sort_pairs(P2), OVar)
         end.
 
 % ---------------------------------------------
@@ -166,20 +173,11 @@ get_groups_with_missing_pairs([Pair|Pairs], Acc) ->
 
 % @pre -
 % @post -
-is_irreductible(ID) ->
-    Pairs = achlys_util:query(ID),
-    is_irreductible(Pairs, sets:new()).
-is_irreductible([], _) -> true;
-is_irreductible([Pair|Pairs], Set) ->
-    case Pair of #{key := Key} ->
-        case sets:is_element(Key, Set) of
-            true -> false;
-            false -> is_irreductible(
-                Pairs,
-                sets:add_element(Key, Set)
-            )
-        end
-    end.
+is_irreductible(IVar, OVar) ->
+    P1 = achlys_util:query(IVar),
+    P2 = achlys_util:query(OVar),
+    % TODO: When do we stop ?
+    false.
 
 % @pre -
 % @post -
@@ -206,39 +204,59 @@ give_task(Current, Vars, Reduce) ->
 
 % @pre -
 % @post -
-round(Vars, Round, Reduce) ->
+format_result(ID) ->
+    Pairs = achlys_util:query(ID),
+    lists:map(fun(Pair) ->
+        % maps:without([id], Pair)
+        Pair
+    end, Pairs).
+
+% @pre -
+% @post -
+convert_key(Key) when erlang:is_atom(Key) ->
+    erlang:atom_to_list(Key);
+convert_key(Key) when erlang:is_integer(Key) ->
+    erlang:integer_to_list(Key).
+
+% @pre -
+% @post -
+round(Vars, Round, Reduce, Options) ->
     {IVar, CVar, OVar} = Vars,
-    Dispatching = shuffle_phase(IVar, fun(Key) ->
-        A = erlang:integer_to_list(Round),
-        B = erlang:atom_to_list(Key),
-        C = erlang:list_to_binary(A ++ B),
-        {C, state_twopset}
-    end),
-    Iterator = maps:iterator(Dispatching),
-    give_task(maps:next(Iterator), {CVar, OVar}, Reduce),
-    I = maps:size(Dispatching),
-    lasp:read(CVar, {cardinality, I}),
-    J = get_total_cardinality(achlys_util:query(CVar)),
-
-    % TODO: If timeout,
-    % Groups = get_groups_with_missing_pairs(
-    %     achlys_util:query(OVar),
-    %     get_cardinality_per_key(achlys_util:query(CVar))
-    % ),
-
-    lasp:read(OVar, {cardinality, J}),    
-    case is_irreductible(OVar) of
-        true -> achlys_util:query(OVar);
-        false ->
-            round({
-                OVar,
-                {erlang:list_to_binary(
-                    erlang:integer_to_list(Round) ++ "-cvar"
-                ), state_gset},
-                {erlang:list_to_binary(
-                    erlang:integer_to_list(Round) ++ "-over"
-                ), state_gset}
-            }, Round + 1, Reduce)
+    case maps:get(max_round, Options) of
+        Max when Round > Max ->
+            io:format("Max round reached !~n"),
+            format_result(IVar);
+        _ ->
+            Dispatching = shuffle_phase(IVar, fun(Key) ->
+                A = erlang:integer_to_list(Round),
+                B = convert_key(Key),
+                C = erlang:list_to_binary(A ++ B),
+                {C, state_twopset}
+            end),
+            Iterator = maps:iterator(Dispatching),
+            give_task(maps:next(Iterator), {CVar, OVar}, Reduce),
+            I = maps:size(Dispatching),
+            % TODO: Add timeout here
+            lasp:read(CVar, {cardinality, I}),
+            J = get_total_cardinality(achlys_util:query(CVar)),
+            % TODO: Add timeout here
+            % Groups = get_groups_with_missing_pairs(
+            %     achlys_util:query(OVar),
+            %     get_cardinality_per_key(achlys_util:query(CVar))
+            % ),
+            lasp:read(OVar, {cardinality, J}),    
+            case is_irreductible(IVar, OVar) of
+                true -> format_result(OVar);
+                false -> round({
+                    OVar,
+                    {erlang:list_to_binary(
+                        erlang:integer_to_list(Round) ++ "-cvar"
+                    ), state_gset},
+                    {erlang:list_to_binary(
+                        erlang:integer_to_list(Round) ++ "-over"
+                    ), state_gset}
+                }, Round + 1, Reduce, Options)
+            end
     end.
 
 % @pre -
@@ -249,7 +267,9 @@ schedule(Entries, Reduce) ->
     OVar = {<<"0-ovar">>, state_gset},
     I = map_phase(Entries, IVar),
     lasp:read(IVar, {cardinality, I}),
-    round({IVar, CVar, OVar}, 1, Reduce).
+    round({IVar, CVar, OVar}, 1, Reduce, #{
+        max_round => 1
+    }).
 
 % ---------------------------------------------
 % Debugging:
