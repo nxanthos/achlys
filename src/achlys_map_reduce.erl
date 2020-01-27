@@ -3,7 +3,6 @@
 
 -export([
     schedule/2,
-    get_size/0,
     debug/1
 ]).
 
@@ -126,23 +125,24 @@ reduce_phase(Key, IVar, Reduce, OVar) ->
         end.
 
 % ---------------------------------------------
-% Tasks:
+% Helpers:
 % ---------------------------------------------
 
 % @pre -
 % @post -
-get_cardinality(L) ->
-    get_cardinality(L, 0).
-get_cardinality([], Total) -> Total;
-get_cardinality([{_, N}|T], Total) ->
-    get_cardinality(T, Total + N).
+get_total_cardinality(L) ->
+    get_total_cardinality(L, 0).
+get_total_cardinality([], Total) -> Total;
+get_total_cardinality([{_, N}|T], Total) ->
+    get_total_cardinality(T, Total + N).
 
 % @pre -
 % @post -
-get_counter(L) -> get_counter(L, #{}).
-get_counter([], Acc) -> Acc;
-get_counter([{Key, N}|T], Acc) ->
-    get_counter(T, maps:put(Key, N, Acc)).
+get_cardinality_per_key(L) ->
+    get_cardinality_per_key(L, #{}).
+get_cardinality_per_key([], Acc) -> Acc;
+get_cardinality_per_key([{Key, N}|T], Acc) ->
+    get_cardinality_per_key(T, maps:put(Key, N, Acc)).
 
 % @pre -
 % @post -
@@ -166,7 +166,8 @@ get_groups_with_missing_pairs([Pair|Pairs], Acc) ->
 
 % @pre -
 % @post -
-is_irreductible(Pairs) ->
+is_irreductible(ID) ->
+    Pairs = achlys_util:query(ID),
     is_irreductible(Pairs, sets:new()).
 is_irreductible([], _) -> true;
 is_irreductible([Pair|Pairs], Set) ->
@@ -180,84 +181,86 @@ is_irreductible([Pair|Pairs], Set) ->
         end
     end.
 
+% @pre -
+% @post -
+choose_node() ->
+    {ok, Members} = partisan_peer_service:members(),
+    Length = erlang:length(Members),
+    Index = rand:uniform(Length),
+    [lists:nth(Index, Members)].
+
+% @pre -
+% @post -
+give_task(none, _, _) -> ok;
+give_task(Current, Vars, Reduce) ->
+    {Key, #{n := N, variable := IVar}, Iterator} = Current,
+    {CVar, OVar} = Vars,
+    Node = choose_node(),
+    Task = achlys:declare(mytask, Node, single, fun() ->
+        lasp:read(IVar, {cardinality, N}),
+        I = reduce_phase(Key, IVar, Reduce, OVar),
+        lasp:update(CVar, {add, {Key, I}}, self())
+    end),
+    achlys:bite(Task),
+    give_task(maps:next(Iterator), Vars, Reduce).
+
+% @pre -
+% @post -
+round(Vars, Round, Reduce) ->
+    {IVar, CVar, OVar} = Vars,
+    Dispatching = shuffle_phase(IVar, fun(Key) ->
+        A = erlang:integer_to_list(Round),
+        B = erlang:atom_to_list(Key),
+        C = erlang:list_to_binary(A ++ B),
+        {C, state_twopset}
+    end),
+    Iterator = maps:iterator(Dispatching),
+    give_task(maps:next(Iterator), {CVar, OVar}, Reduce),
+    I = maps:size(Dispatching),
+    lasp:read(CVar, {cardinality, I}),
+    J = get_total_cardinality(achlys_util:query(CVar)),
+
+    % TODO: If timeout,
+    % Groups = get_groups_with_missing_pairs(
+    %     achlys_util:query(OVar),
+    %     get_cardinality_per_key(achlys_util:query(CVar))
+    % ),
+
+    lasp:read(OVar, {cardinality, J}),    
+    case is_irreductible(OVar) of
+        true -> achlys_util:query(OVar);
+        false ->
+            round({
+                OVar,
+                {erlang:list_to_binary(
+                    erlang:integer_to_list(Round) ++ "-cvar"
+                ), state_gset},
+                {erlang:list_to_binary(
+                    erlang:integer_to_list(Round) ++ "-over"
+                ), state_gset}
+            }, Round + 1, Reduce)
+    end.
+
+% @pre -
+% @post -
+schedule(Entries, Reduce) ->
+    IVar = {<<"0-ivar">>, state_gset},
+    CVar = {<<"0-cvar">>, state_gset},
+    OVar = {<<"0-ovar">>, state_gset},
+    I = map_phase(Entries, IVar),
+    lasp:read(IVar, {cardinality, I}),
+    round({IVar, CVar, OVar}, 1, Reduce).
+
 % ---------------------------------------------
 % Debugging:
 % ---------------------------------------------
 
 % @pre -
 % @post -
-get_size() ->
-    {ok, Set} = lasp:query({<<"pairs">>, state_twopset}),
-    sets:size(Set).
-
-% @pre -
-% @post -
 debug(Name) ->
     {ok, Set} = lasp:query({
         erlang:list_to_binary(Name),
-        state_twopset
+        state_gset
     }),
     Content = sets:to_list(Set),
     io:format("Variable (~p) -> ~p~n", [Name, Content]).
-
-% ---------------------------------------------
-% API:
-% ---------------------------------------------
-
-% @pre -
-% @post -
-give_task(none, _) -> ok;
-give_task({Key, #{n := N, variable := IVar}, Iterator}, Reduce) ->
-
-    CVar = {<<"cardinality">>, state_twopset},
-    OVar = {<<"output">>, state_twopset},
-
-    Task = achlys:declare(mytask, all, single, fun() ->
-        lasp:read(IVar, {cardinality, N}),
-        M = reduce_phase(Key, IVar, Reduce, OVar),
-        lasp:update(CVar, {add, {Key, M}}, self())
-    end),
-
-    achlys:bite(Task),
-    give_task(maps:next(Iterator), Reduce).
-
-% @pre -
-% @post -
-schedule(Entries, Reduce) ->
-
-    IVar = {<<"pairs">>, state_twopset},
-    CVar = {<<"cardinality">>, state_twopset},
-    OVar = {<<"output">>, state_twopset},
-
-    I = map_phase(Entries, IVar),
-    lasp:read(IVar, {cardinality, I}),
-    
-    Dispatching = shuffle_phase(IVar, fun(Key) ->
-        A = erlang:integer_to_list(1), % Round
-        B = erlang:atom_to_list(Key),
-        C = erlang:list_to_binary(A ++ B),
-        {C, state_twopset}
-    end),
-
-    Iterator = maps:iterator(Dispatching),
-    give_task(maps:next(Iterator), Reduce),
-
-    J = maps:size(Dispatching),
-    lasp:read(CVar, {cardinality, J}),
-    K = get_cardinality(achlys_util:query(CVar)),
-
-    lasp:read(OVar, {cardinality, K}),
-    % TODO: Timeout ->
-    Groups = get_groups_with_missing_pairs(
-        achlys_util:query(OVar),
-        get_counter(achlys_util:query(CVar))
-    ),
-
-    debug("pairs"),
-    debug("cardinality"),
-    debug("output"),
-
-    io:format("No convergence for group:~p~n", [Groups]),
-    io:format("is output irreductible ? ~p~n", [
-        is_irreductible(achlys_util:query(OVar))
-    ]).
