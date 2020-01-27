@@ -56,10 +56,10 @@ handle_cast({on_change, ID, Values}, State) ->
                 Key = erlang:binary_to_list(Name),
                 Variable = maps:get(Key, Variables),
                 case Variable of #{last_values := Last_values, map := Fun} ->
-                    % Delta = sets:subtract(Values, Last_values),
-                    % io:format("~p~n", [Delta]),
-                    % map_phase(Delta, Fun),
-                    map_phase([], Fun),
+                    Delta = sets:subtract(Values, Last_values),
+                    io:format("~p~n", [Delta]),
+                    map_phase(Delta, Fun),
+                    % map_phase([], Fun),
                     notify(),
                     {noreply, mapz:deep_put(
                         [variables, Key, last_values],
