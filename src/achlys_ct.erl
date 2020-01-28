@@ -1,5 +1,6 @@
 -module(achlys_ct).
 -export([
+    new/0,
     get/2,
     get_all/1,
     add/3,
@@ -8,6 +9,12 @@
 ]).
 
 % Helpers:
+
+new() -> #{
+    mapping => #{},
+    roots => #{},
+    nodes => #{}
+}.
 
 generate_ID() ->
     erlang:unique_integer().

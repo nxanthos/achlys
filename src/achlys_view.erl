@@ -25,17 +25,13 @@ init([]) ->
     {ok, #{
         listeners => [],
         variables => #{},
-        tree => #{
-            mapping => #{},
-            roots => #{},
-            nodes => #{}
-        }
+        tree => achlys_ct:new()
     }}.
 
 % Cast:
 
 handle_cast({map, ID, Fun}, State) ->
-    case State of #{variables := Variables} ->
+    case State of #{variables := _} ->
         lasp:stream(ID, fun(Values) ->
             gen_server:cast(?SERVER, {on_change, ID, Values})
         end),
@@ -43,7 +39,7 @@ handle_cast({map, ID, Fun}, State) ->
         Key = erlang:binary_to_list(Name),
         {noreply, mapz:deep_put(
             [variables, Key],
-            #{last_values => [], map => Fun},
+            #{last_values => sets:new(), map => Fun},
             State
         )}
     end;
@@ -56,10 +52,8 @@ handle_cast({on_change, ID, Values}, State) ->
                 Key = erlang:binary_to_list(Name),
                 Variable = maps:get(Key, Variables),
                 case Variable of #{last_values := Last_values, map := Fun} ->
-                    Delta = sets:subtract(Values, Last_values),
-                    io:format("~p~n", [Delta]),
-                    map_phase(Delta, Fun),
-                    % map_phase([], Fun),
+                    {Added_Pairs, _} = get_delta(Last_values, Values),
+                    map_phase(Added_Pairs, Fun),
                     notify(),
                     {noreply, mapz:deep_put(
                         [variables, Key, last_values],
@@ -95,12 +89,12 @@ handle_cast({add_listener, Listener}, State) ->
     end;
 
 handle_cast(notify, State) ->
-    % case State of #{tree := Tree, listeners := Listeners} ->
-    %     lists:foreach(fun(Listener) ->
-    %         erlang:apply(Listener, achlys_ct:get_all(Tree))
-    %     end, Listeners),
-    % end;
-    {noreply, State};
+    case State of #{tree := Tree, listeners := Listeners} ->
+        lists:foreach(fun(Listener) ->
+            erlang:apply(Listener, achlys_ct:get_all(Tree))
+        end, Listeners),
+        {noreply, State}
+    end;
 
 handle_cast(debug, State) ->
     io:format("State= ~p~n", [State]),
@@ -119,6 +113,13 @@ map_phase([H|T], Fun) ->
         gen_server:cast(?SERVER, {emit, Key, Value})
     end),
     map_phase(T, Fun).
+
+get_delta(A, B) ->
+    Added_Pairs = sets:to_list(sets:subtract(B, A)),
+    Removed_Pairs = sets:to_list(sets:subtract(A, B)),
+    % io:format("Added pairs: ~p~n", [Added_Pairs]),
+    % io:format("Removed pairs: ~p~n", [Removed_Pairs]),
+    {Added_Pairs, Removed_Pairs}.
 
 notify() ->
     gen_server:cast(?SERVER, notify).
