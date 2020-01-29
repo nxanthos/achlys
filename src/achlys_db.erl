@@ -10,12 +10,12 @@ split([], Acc) -> Acc;
 split([Value|Values], Acc) ->
     {L1, L2, L3} = Acc,
     case Value of
+        #{a := _, c := _} ->
+            split(Values, {L1, L2, [Value|L3]});
         #{a := _} ->
             split(Values, {[Value|L1], L2, L3});
         #{c := _} ->
-            split(Values, {L1, [Value|L2], L3});
-        _ ->
-            split(Values, {L1, L2, [Value|L3]})
+            split(Values, {L1, [Value|L2], L3})
     end.
 
 % @pre -
