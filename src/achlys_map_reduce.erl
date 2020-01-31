@@ -116,7 +116,7 @@ sort_pairs(Pair) when erlang:is_tuple(Pair) ->
 % @post -
 has_changed(P1, P2) ->
     P3 = [{Key, Value} || #{key := Key, value := Value} <- P1],
-    % io:format("P2=~p~nP3~p~n", [P2, P3]),
+    % io:format("P2=~p~nP3=~p~n", [P2, P3]),
     not (lists:sort(P2) =:= lists:sort(P3)).
 
 % @pre -
@@ -196,11 +196,12 @@ choose_node() ->
     Index = rand:uniform(Length),
     [lists:nth(Index, Members)].
 
-% @pre -
-% @post -
-give_task(none, _, _) -> ok;
-give_task(Current, Vars, Reduce) ->
-    {Key, #{n := N, variable := IVar}, Iterator} = Current,
+give_task([], _, _, _) -> ok;
+give_task([Key|Keys], Dispatching, Vars, Reduce) ->
+    give_task(Key, Dispatching, Vars, Reduce),
+    give_task(Keys, Dispatching, Vars, Reduce);
+give_task(Key, Dispatching, Vars, Reduce) ->
+    #{n := N, variable := IVar} = maps:get(Key, Dispatching),
     {CVar, OVar} = Vars,
     Node = choose_node(),
     Task = achlys:declare(mytask, Node, single, fun() ->
@@ -210,8 +211,7 @@ give_task(Current, Vars, Reduce) ->
             {Key, Number, Flag}
         }, self())
     end),
-    achlys:bite(Task),
-    give_task(maps:next(Iterator), Vars, Reduce).
+    achlys:bite(Task).
 
 % @pre -
 % @post -
@@ -242,12 +242,13 @@ round(Vars, Round, Reduce, Options) ->
                 erlang:list_to_binary(erlang:integer_to_list(Round) ++ convert_key(Key)),
                 state_twopset
             } end),
-            Iterator = maps:iterator(Dispatching),
-            give_task(maps:next(Iterator), {CVar, OVar}, Reduce),
+
+            Keys = maps:keys(Dispatching),
+            give_task(Keys, Dispatching, {CVar, OVar}, Reduce),
             I = maps:size(Dispatching),
-            
+
             % TODO: Add timeout here
-            
+
             lasp:read(CVar, {cardinality, I}),
             Status = achlys_util:query(CVar),
             J = get_total_cardinality(Status),
@@ -257,6 +258,7 @@ round(Vars, Round, Reduce, Options) ->
             %     achlys_util:query(OVar),
             %     get_cardinality_per_key(Cardinalities)
             % ),
+            % give_task(Groups, Dispatching, {CVar, OVar}, Reduce),
             % io:format("Missing pairs for group~p~n", [Groups]),
             
             lasp:read(OVar, {cardinality, J}),    

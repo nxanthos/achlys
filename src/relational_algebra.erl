@@ -1,5 +1,8 @@
--module(achlys_db).
+-module(relational_algebra).
 -export([
+    sum_test/0,
+    count_test/0,
+    filter_test/0,
     natural_join_test/0
 ]).
 
@@ -34,14 +37,6 @@ natural_join(Key, L2, [H1|T1], [H2|T2]) ->
 
 % @pre -
 % @post -
-format_result([]) -> [];
-format_result([Pair|Pairs]) ->
-    case Pair of #{key := Key, value := Value} ->
-        [maps:put(b, Key, Value)|format_result(Pairs)]
-    end.
-
-% @pre -
-% @post -
 natural_join_test() ->
     {V1, V2} = get_tables(),
     Pairs = achlys_map_reduce:schedule([
@@ -67,7 +62,7 @@ natural_join_test() ->
         L
     end),
 
-    % Expected result :
+    % Expected result:
 
     % | A | B | C |
     % |---|---|---|
@@ -77,7 +72,92 @@ natural_join_test() ->
     % | 2 | b | y |
     % | 2 | c | y |
 
-    io:format("~p~n", [format_result(Pairs)]).
+    lists:foreach(fun(Pair) ->
+        case Pair of #{key := Key, value := Value} ->
+            io:format("~p~n", [maps:put(b, Key, Value)])
+        end
+    end, Pairs).
+
+% @pre -
+% @post -
+count_test() ->
+    {V1, _} = get_tables(),
+    Pairs = achlys_map_reduce:schedule([
+        {V1, fun(Value) -> % R1
+            case Value of #{b := B, a := _} ->
+                [{B, 1}]
+            end
+        end}
+    ], fun(Key, Values) ->
+        [{Key, lists:sum(Values)}]
+    end),
+
+    % Expected result:
+
+    % | a | 1 |
+    % | b | 2 |
+    % | c | 1 |
+    
+    lists:foreach(fun(Pair) ->
+        case Pair of #{key := Key, value := Value} ->
+            io:format("|~p|~p|~n", [Key, Value])
+        end
+    end, Pairs).
+
+% @pre -
+% @post -
+sum_test() ->
+    {V1, _} = get_tables(),
+    Pairs = achlys_map_reduce:schedule([
+        {V1, fun(Value) -> % R1
+            case Value of #{b := B, a := A} ->
+                [{B, A}]
+            end
+        end}
+    ], fun(Key, Values) ->
+        [{Key, lists:sum(Values)}]
+    end),
+
+    % Expected result:
+
+    % | b | 2 |
+    % | b | 2 |
+
+    lists:foreach(fun(Pair) ->
+        case Pair of #{key := Key, value := Value} ->
+            io:format("|~p|~p|~n", [Key, Value])
+        end
+    end, Pairs).
+
+% @pre -
+% @post -
+filter_test() ->
+    {V1, _} = get_tables(),
+    Pairs = achlys_map_reduce:schedule([
+        {V1, fun(Value) -> % R1
+            case Value of #{b := B, a := A} ->
+                [{B, A}]
+            end
+        end}
+    ], fun(Key, Values) ->
+        lists:foldl(fun(Value, Acc) -> 
+            case Value rem 2 == 0 of
+                true -> [{Key, Value}|Acc];
+                false -> Acc
+            end
+        end, [], Values)
+    end),
+
+    % Expected result:
+
+    % | b | 2 |
+    % | c | 2 |
+
+    lists:foreach(fun(Pair) ->
+        case Pair of #{key := Key, value := Value} ->
+            io:format("|~p|~p|~n", [Key, Value])
+        end
+    end, Pairs).
 
 % ---------------------------------------------
 % Data :
@@ -100,10 +180,6 @@ get_R2() -> [
     #{b => b, c => y},
     #{b => c, c => y}
 ].
-
-% ---------------------------------------------
-% Test :
-% ---------------------------------------------
 
 % @pre -
 % @post -
