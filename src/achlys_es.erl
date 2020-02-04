@@ -40,6 +40,7 @@ init([ID, State, Handler]) ->
     }}.
 
 % Synchronous:
+
 handle_call(read, _From, Data) ->
     case Data of #{state := State} ->
         {reply, State, Data}
@@ -92,5 +93,7 @@ update(Fun) ->
         gen_server:cast(?SERVER, {add_event, Event})
     end]).
 
+% @pre -
+% @post -
 debug() ->
     gen_server:cast(?SERVER, debug).

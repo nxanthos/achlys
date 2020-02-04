@@ -35,7 +35,8 @@ event_listener({is_not_prime, K}, State) ->
     } -> #{
         numbers => lists:delete(K, Numbers),
         solutions => Solutions
-    } end.
+    } end;
+event_listener(_, State) -> State.
 
 % @pre -
 % @post -

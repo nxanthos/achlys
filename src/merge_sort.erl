@@ -1,106 +1,140 @@
 -module(merge_sort).
-
--behaviour(gen_server).
-
--export([start_link/0]).
 -export([
-    start_achlys_map_reduce/0
+    debug/0,
+    schedule/0
 ]).
--export([debug/0]).
--export([
-    init/1 ,
-    handle_call/3 ,
-    handle_cast/2 ,
-    handle_info/2 ,
-    terminate/2 ,
-    code_change/3
-]).
-
--define(SERVER, ?MODULE).
-
--record(state, {}).
-
-start_link() ->
-    gen_server:start_link({local , ?SERVER} , ?MODULE , [] , []).
-
-init([]) ->
-    {ok , #state{}}.
-
-handle_call(_Request, _From , State) ->
-    {reply , ok , State}.
-
-handle_cast(_Request, State) ->
-    {noreply , State}.
-
-handle_info(_Info, State) ->
-    case _Info of
-        {task, Task} -> 
-            io:format("Starting task ~n", []),
-            achlys:bite(Task)
-    end,
-    {noreply , State}.
-
-terminate(_Reason, _State) ->
-    ok.
-
-code_change(_OldVsn, State, _Extra) ->
-    {ok , State}.
 
 % Helpers :
 
-start_achlys_map_reduce() ->
-    
-    N = 10,
-    ID = {<<"set">>, state_gset},
-    lists:foreach(fun(K) ->
-        lasp:update(ID, {add, K}, self())
-    end, lists:seq(1, N)),
-    lasp:read(ID, {cardinality, N}),
+% @pre -
+% @post -
+shuffle(L) ->
+    lists:sort(fun(_, _) ->
+        rand:uniform() > 0.5
+    end, L).
 
-    achlys_map_reduce:start_link(),
+% @pre -
+% @post -
+insert([], E) -> [E];
+insert([H|T], E) when E < H -> [E|[H|T]];
+insert([H|T], E) when E >= H -> [H|insert(T, E)].
 
-    % Map function
-    achlys_map_reduce:map("get-samples", ID, fun(Value) ->
-        [{sort, Value}]
-    end),
+% @pre -
+% @post -
+get_association([], _) -> none;
+get_association([_|[]], _) -> none;
+get_association([H1|[H2|T]], N) when H2 - H1 > 1 ->
+    get_association([H2|T], N);
+get_association([H1|[H2|T]], N) when H2 - H1 == 1 ->
+    case ((H1 - 1) rem 2) == 0 of
+        false -> get_association([H2|T], N);
+        true -> {{H1, H2}, H1 + N - erlang:trunc(H1 / 2)}
+    end.
 
-    % Reduce function
-    achlys_map_reduce:reduce("get-samples", fun(P1, P2) ->
-        io:format("P1: ~p~n", [P1]),
-        io:format("P2: ~p~n", [P2]),
-        case {P1, P2} of {#{value := V1}, #{value := V2}} ->
-            {sort, msort(V1, V2)}
+% @pre -
+% @post -
+get_node([], _) -> none;
+get_node([Node|Nodes], I) ->
+    case Node of #{id := J} ->
+        case I == J of
+            true -> Node;
+            false -> get_node(Nodes, I)
+        end
+    end.
+
+% @pre -
+% @post -
+merge([], []) -> [];
+merge([], L2) -> L2;
+merge(L1, []) -> L1;
+merge([H1|T1], [H2|T2]) when H1 > H2 ->
+    [H2|merge([H1|T1], T2)];
+merge([H1|T1], [H2|T2]) when H1 =< H2 ->
+    [H1|merge(T1, [H2|T2])].
+
+% @pre -
+% @post -
+event_listener({reduce, Pred, Node}, State) ->
+    case State of #{ids := IDS, nodes := Nodes} ->
+        case Node of #{id := ID} ->
+            L = erlang:tuple_to_list(Pred),
+            maps:merge(State, #{
+                ids => insert(lists:filter(fun(K) ->
+                    not lists:member(K, L)
+                end, IDS), ID),
+                nodes => [Node|Nodes]
+            })
+        end
+    end;
+event_listener(_, State) -> State.
+
+% @pre -
+% @post -
+update(State, Emit) ->
+    case State of #{ids := IDs, n := N, nodes := Nodes} ->
+        case get_association(IDs, N) of
+            {Pred, Succ} ->
+                {ID1, ID2} = Pred,
+                case {
+                    get_node(Nodes, ID1),
+                    get_node(Nodes, ID2)
+                } of {
+                    #{values := V1},
+                    #{values := V2}
+                } ->
+                    Emit({reduce, Pred, #{
+                        id => Succ,
+                        values => merge(V1, V2)
+                    }})
+                end;
+            _ -> ok
+        end
+    end.
+
+% @pre -
+% @post -
+loop() ->
+    case achlys_es:read() of
+        #{ids := [_|[_|_]]} -> % At least 2 values
+            achlys_es:update(fun update/2),
+            timer:sleep(100),
+            loop();
+        #{ids := _} -> ok
+    end.
+
+% @pre -
+% @post -
+schedule() ->
+    N = 30,
+    List = lists:seq(1, N),
+    ID = {<<"events">>, state_gset},
+    State = #{
+        n => N,
+        ids => List,
+        nodes => lists:map(fun(K) ->
+            #{id => K, values => [K]}
+        end, shuffle(List))
+    },
+    io:format("~w~n", [State]),
+    Task = achlys:declare(mytask, all, single, fun() ->
+        io:format("Execution of the task~n"),
+        achlys_es:start_link(ID, State,
+            fun event_listener/2
+        ),
+        loop(),
+        case achlys_es:read() of #{ids := [K], nodes := Nodes} ->
+            case get_node(Nodes, K) of #{values := Values} ->
+                io:format("Solution: ~p~n", [Values])
+            end
         end
     end),
+    achlys:bite(Task).
 
-    achlys_map_reduce:schedule().
-
-
+% @pre -
+% @post -
 debug() ->
-    Type = state_gset,
-    Set = achlys_util:query({<<"set">>, Type}),
-    io:format("Set: ~p~n", [Set]).
-
-
-
-msort([L]) -> [L];
-msort(L)   ->
-    {L1,L2} = lists:split(length(L) div 2, L),
-    msort(msort(L1), msort(L2)).
-
-msort(L1, L2) -> 
-    case {L1, L2} of 
-        {[H1|T1], [H2|T2]} ->
-            msort(L1, L2, []);
-        {H1, [H2|T2]} ->
-            msort([L1], L2, []);
-        {[H1|T1], H2} ->
-            msort(L1, [L2], []);
-        _ -> msort([L1], [L2], [])
-    end.
-    
-msort([], L2, A) -> A++L2;
-msort(L1, [], A) -> A++L1;
-msort([H1|T1], [H2|T2], A) when H2>=H1 -> msort(T1, [H2|T2], A++[H1]);
-msort([H1|T1], [H2|T2], A) when H1>H2  -> msort([H1|T1], T2, A++[H2]);
-msort([], [], A) -> A.
+    ID = {<<"events">>, state_gset},
+    {ok, Set} = lasp:query(ID),
+    Content = sets:to_list(Set),
+    io:format("Variable: ~p~n", [Content]),
+    io:format("State: ~p~n",[achlys_es:read()]).
