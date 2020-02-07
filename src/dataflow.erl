@@ -1,11 +1,111 @@
 -module(dataflow).
 -export([
     test_map/0,
+    test_filter/0,
     test_fold/0,
     test_dag_link/0,
     test_process/0,
     debug/0
 ]).
+
+% @pre -
+% @post -
+test_map() ->
+
+    IVar = {<<"ivar-process">>, state_orset},
+    OVar = {<<"ovar-process">>, state_orset},
+
+    lasp:declare(IVar, state_orset),
+    lasp:declare(OVar, state_orset),
+
+    N = 10,
+    lasp:update(IVar, {add_all, lists:seq(1, N)}, self()),
+    lasp:read(IVar, {cardinality, N}),
+
+    Fun = fun(K) -> K + 1 end,
+    lasp:map(IVar, Fun, OVar),
+    lasp:read(OVar, {cardinality, N}),
+
+    debug("ivar-process"),
+    debug("ovar-process"),
+
+    lasp:update(IVar, {rmv, rand:uniform(N)}, self()),
+    lasp:read(IVar, {cardinality, N - 1}),
+
+    debug("ivar-process"),
+    debug("ovar-process"),
+
+    % dataflow:test_map().
+    ok.
+
+% @pre -
+% @post -
+test_filter() ->
+
+    IVar = {<<"ivar-process">>, state_orset},
+    OVar = {<<"ovar-process">>, state_orset},
+
+    lasp:declare(IVar, state_orset),
+    lasp:declare(OVar, state_orset),
+
+    N = 10,
+    lasp:update(IVar, {add_all, lists:seq(1, N)}, self()),
+    lasp:read(IVar, {cardinality, N}),
+
+    Fun = fun(Value) -> Value rem 2 == 0 end,
+    lasp:filter(IVar, Fun, OVar),
+    lasp:read(OVar, {cardinality, erlang:trunc(N / 2)}),
+    
+    debug("ivar-process"),
+    debug("ovar-process"),
+
+    lasp:update(IVar, {rmv, 2}, self()),
+    lasp:read(IVar, {cardinality, erlang:trunc(N / 2) - 1}),
+
+    debug("ivar-process"),
+    debug("ovar-process"),
+
+    % dataflow:test_filter().
+    ok.
+
+% @pre -
+% @post -
+test_fold() ->
+
+    {ok, {IVar, _, _, _}} = lasp:declare(orset),
+    {ok, {OVar, _, _, _}} = lasp:declare(pncounter),
+
+    N = 10,
+    lasp:update(IVar, {add_all, lists:seq(1, N)}, self()),
+    lasp:read(IVar, {cardinality, N}),
+
+    Fun = fun(X, Acc) ->
+        % X + Acc
+        % io:format("X=~p Acc=~p~n", [X, Acc]),
+        [increment, increment]
+    end,
+
+    % lasp:update(OVar, decrement, self()),
+    % lasp:update(OVar, increment, self()),
+
+    lasp:fold(IVar, Fun, OVar),
+    timer:sleep(1000),
+
+    {ok, S1} = lasp:query(IVar),
+    {ok, S2} = lasp:query(OVar),
+    io:format("IVar: ~w~n", [sets:to_list(S1)]),
+    io:format("OVar: ~w~n", [S2]),
+
+    lasp:update(IVar, {rmv, 5}, self()),
+    timer:sleep(1000),
+
+    {ok, S3} = lasp:query(IVar),
+    {ok, S4} = lasp:query(OVar),
+    io:format("IVar: ~w~n", [sets:to_list(S3)]),
+    io:format("OVar: ~w~n", [S4]),
+
+    % dataflow:test_fold().
+    ok.
 
 % @pre -
 % @post -
@@ -34,7 +134,7 @@ test_dag_link() ->
             end
         end,
         {OVar, fun(ID, Values) -> % Write function
-            io:format("Write OVar: ~p~n", [OVar]),
+            io:format("Write OVar: ~p~n", [ID]),
             io:format("Write Value: ~p~n", [Values]),
             lasp:update(ID, {add, Values}, self())
         end}
@@ -44,51 +144,6 @@ test_dag_link() ->
     lasp:update(IVar, {add, 1}, self()),
     lasp:update(IVar, {add, 2}, self()),
     timer:sleep(500),
-
-    debug("ivar-process"),
-    debug("ovar-process"),
-    ok.
-
-% @pre -
-% @post -
-test_map() ->
-
-    IVar = {<<"ivar-process">>, state_orset},
-    OVar = {<<"ovar-process">>, state_orset},
-
-    lasp:declare(IVar, state_orset),
-    lasp:declare(OVar, state_orset),
-
-    achlys_util:repeat(10, fun(K) ->
-        lasp:update(IVar, {add, K}, self())
-    end),
-
-    Fun = fun(K) -> K + 1 end,
-    lasp:map(IVar, Fun, OVar),
-    timer:sleep(500),
-
-    debug("ivar-process"),
-    debug("ovar-process"),
-    ok.
-
-% @pre -
-% @post -
-test_fold() ->
-
-    IVar = {<<"ivar-process">>, state_orset},
-    OVar = {<<"ovar-process">>, state_orset},
-
-    lasp:declare(IVar, state_orset),
-    lasp:declare(OVar, state_orset),
-
-    achlys_util:repeat(10, fun(K) ->
-        lasp:update(IVar, {add, K}, self())
-    end),
-
-    % TODO:
-    % Fun = fun(...) -> ... end,
-    % lasp:fold(IVar, Fun, OVar),
-    % timer:sleep(500),
 
     debug("ivar-process"),
     debug("ovar-process"),
