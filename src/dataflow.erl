@@ -3,17 +3,18 @@
     test_map/0,
     test_filter/0,
     test_fold/0,
+    test_distributed_fold/0,
     test_dag_link/0,
     test_process/0,
-    debug/0
+    debug/2
 ]).
 
 % @pre -
 % @post -
 test_map() ->
 
-    IVar = {<<"ivar-process">>, state_orset},
-    OVar = {<<"ovar-process">>, state_orset},
+    IVar = {<<"ivar">>, state_orset},
+    OVar = {<<"ovar">>, state_orset},
 
     lasp:declare(IVar, state_orset),
     lasp:declare(OVar, state_orset),
@@ -26,14 +27,14 @@ test_map() ->
     lasp:map(IVar, Fun, OVar),
     lasp:read(OVar, {cardinality, N}),
 
-    debug("ivar-process"),
-    debug("ovar-process"),
+    debug(IVar, "ivar"),
+    debug(OVar, "ovar"),
 
     lasp:update(IVar, {rmv, rand:uniform(N)}, self()),
     lasp:read(IVar, {cardinality, N - 1}),
 
-    debug("ivar-process"),
-    debug("ovar-process"),
+    debug(IVar, "ivar"),
+    debug(OVar, "ovar"),
 
     % dataflow:test_map().
     ok.
@@ -42,8 +43,8 @@ test_map() ->
 % @post -
 test_filter() ->
 
-    IVar = {<<"ivar-process">>, state_orset},
-    OVar = {<<"ovar-process">>, state_orset},
+    IVar = {<<"ivar">>, state_orset},
+    OVar = {<<"ovar">>, state_orset},
 
     lasp:declare(IVar, state_orset),
     lasp:declare(OVar, state_orset),
@@ -56,14 +57,14 @@ test_filter() ->
     lasp:filter(IVar, Fun, OVar),
     lasp:read(OVar, {cardinality, erlang:trunc(N / 2)}),
     
-    debug("ivar-process"),
-    debug("ovar-process"),
+    debug(IVar, "ivar"),
+    debug(OVar, "ovar"),
 
     lasp:update(IVar, {rmv, 2}, self()),
     lasp:read(IVar, {cardinality, erlang:trunc(N / 2) - 1}),
 
-    debug("ivar-process"),
-    debug("ovar-process"),
+    debug(IVar, "ivar"),
+    debug(OVar, "ovar"),
 
     % dataflow:test_filter().
     ok.
@@ -76,43 +77,76 @@ test_fold() ->
     {ok, {OVar, _, _, _}} = lasp:declare(pncounter),
 
     N = 10,
-    lasp:update(IVar, {add_all, lists:seq(1, N)}, self()),
-    lasp:read(IVar, {cardinality, N}),
+    achlys_util:repeat(N, fun(K) ->
+        lasp:update(IVar, {add, K}, self())
+    end),
+
+    lasp:stream(IVar, fun(Set) ->
+        List = sets:to_list(Set),
+        io:format("List: ~w~n", [List])
+    end),
+    lasp:stream(OVar, fun(Sum) ->
+        io:format("Sum: ~p~n", [Sum])
+    end),
 
     Fun = fun(X, Acc) ->
-        % X + Acc
         % io:format("X=~p Acc=~p~n", [X, Acc]),
-        [increment, increment]
+        [{increment, X}] % Sum of all values
     end,
 
     % lasp:update(OVar, decrement, self()),
+    % lasp:update(OVar, {decrement, 5}, self()),
     % lasp:update(OVar, increment, self()),
+    % lasp:update(OVar, {increment, 5}, self()),
 
     lasp:fold(IVar, Fun, OVar),
     timer:sleep(1000),
-
-    {ok, S1} = lasp:query(IVar),
-    {ok, S2} = lasp:query(OVar),
-    io:format("IVar: ~w~n", [sets:to_list(S1)]),
-    io:format("OVar: ~w~n", [S2]),
-
     lasp:update(IVar, {rmv, 5}, self()),
     timer:sleep(1000),
-
-    {ok, S3} = lasp:query(IVar),
-    {ok, S4} = lasp:query(OVar),
-    io:format("IVar: ~w~n", [sets:to_list(S3)]),
-    io:format("OVar: ~w~n", [S4]),
+    lasp:update(IVar, {rmv, 2}, self()),
+    timer:sleep(1000),
+    lasp:update(IVar, {add, 20}, self()),
 
     % dataflow:test_fold().
     ok.
 
 % @pre -
 % @post -
+test_distributed_fold() ->
+
+    {ok, {IVar, _, _, _}} = lasp:declare(orset),
+    {ok, {OVar, _, _, _}} = lasp:declare(pncounter),
+
+    io:format("IVar=~p~nOVar=~p~n", [IVar, OVar]),
+
+    N = 10,
+    achlys_util:repeat(N, fun(K) ->
+        lasp:update(IVar, {add, K}, self())
+    end),
+
+    Fun = fun(X, _) -> [{increment, X}] end,
+    lasp:fold(IVar, Fun, OVar),
+
+    Task = achlys:declare(mytask, all, single, fun() ->
+        timer:sleep(1000),
+        lasp:update(IVar, {rmv, 5}, self()),
+        timer:sleep(1000),
+        lasp:update(IVar, {rmv, 2}, self()),
+        timer:sleep(1000),
+        debug(OVar, "OVar")
+    end),
+
+    achlys:bite(Task),
+
+    % dataflow:test_distributed_fold().
+    ok.
+
+% @pre -
+% @post -
 test_dag_link() ->
 
-    IVar = {<<"ivar-process">>, state_orset},
-    OVar = {<<"ovar-process">>, state_orset},
+    IVar = {<<"ivar">>, state_orset},
+    OVar = {<<"ovar">>, state_orset},
 
     lasp:declare(IVar, state_orset),
     lasp:declare(OVar, state_orset),
@@ -145,16 +179,16 @@ test_dag_link() ->
     lasp:update(IVar, {add, 2}, self()),
     timer:sleep(500),
 
-    debug("ivar-process"),
-    debug("ovar-process"),
+    debug(IVar, "ivar"),
+    debug(OVar, "ovar"),
     ok.
 
 % @pre -
 % @post -
 test_process() ->
 
-    IVar = {<<"ivar-process">>, state_orset},
-    OVar = {<<"ovar-process">>, state_orset},
+    IVar = {<<"ivar">>, state_orset},
+    OVar = {<<"ovar">>, state_orset},
 
     lasp:declare(IVar, state_orset),
     lasp:declare(OVar, state_orset),
@@ -178,7 +212,10 @@ test_process() ->
 
     io:format("State S1: ~w~n", [S1]),
 
-    % The first argument of `lasp_process:process` is a list containing the arguments that will be passed to the transformation function. The arity of the transformation function will have to correspond to the number of items present in the list.
+    % The first argument of `lasp_process:process` is a list containing the
+    % arguments that will be passed to the transformation function. The arity
+    % of the transformation function will have to correspond to the number of
+    % items present in the list.
 
     {ok, R} = lasp_process:process([42], S1),
     io:format("R: ~w~n", [R]),
@@ -197,22 +234,18 @@ test_process() ->
     end,
 
     timer:sleep(500),
-    debug("ivar-process"),
-    debug("ovar-process"),
+    debug(IVar, "ivar"),
+    debug(OVar, "ovar"),
     ok.
 
 % @pre -
 % @post -
-debug() ->
-    debug("ivar-process"),
-    debug("ovar-process").
-
-% @pre -
-% @post -
-debug(Name) ->
-    {ok, Set} = lasp:query({
-        erlang:list_to_binary(Name),
-        state_orset
-    }),
-    Content = sets:to_list(Set),
-    io:format("Variable (~p) -> ~w~n", [Name, Content]).
+debug({_, _} = ID, Name) ->
+    {ok, Result} = lasp:query(ID),
+    case sets:is_set(Result) of
+        true ->
+            List = sets:to_list(Result),
+            io:format("Variable (~p) -> ~w~n", [Name, List]);
+        false ->
+            io:format("Variable (~p) -> ~w~n", [Name, Result])
+    end.
