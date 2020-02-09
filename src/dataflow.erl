@@ -199,9 +199,9 @@ test_process() ->
             io:format("Read Threshold: ~p~n", [Threshold]),
             lasp:read(ID, Threshold) % Synchronous read
         end}],
-        fun(Value) -> % Transformation function
+        fun(Key, Value) -> % Transformation function
             io:format("Transform Value: ~p~n", [Value]),
-            Value
+            #{Key => #{value => Value, parents => [], children => []}}
         end,
         {OVar, fun(ID, Value) -> % Write function
             io:format("Write ID: ~p~n", [ID]),
@@ -212,15 +212,20 @@ test_process() ->
 
     io:format("State S1: ~w~n", [S1]),
 
+    {Key1, Value1} = {ten, 10},
+    {Key2, Value2} = {twenty, 20},
+
     % The first argument of `lasp_process:process` is a list containing the
     % arguments that will be passed to the transformation function. The arity
     % of the transformation function will have to correspond to the number of
     % items present in the list.
+    {ok, R1} = lasp_process:process([Key1, Value1], S1),
+    io:format("R1: ~w~n", [R1]),
+    {ok, R2} = lasp_process:process([Key2, Value2], S1),
+    io:format("R1: ~w~n", [R2]),
 
-    {ok, R} = lasp_process:process([42], S1),
-    io:format("R: ~w~n", [R]),
-    
-    lasp:update(IVar, {add, 10}, self()),
+    lasp:update(IVar, {add, {Key1, Value1}}, self()),
+    lasp:update(IVar, {add, {Key2, Value2}}, self()),
 
     % Synchronous read
     case lasp_process:read(S1) of {ok, Functions, S2} ->
