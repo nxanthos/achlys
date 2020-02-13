@@ -12,7 +12,7 @@
 
 % @pre -
 % @post -
-add_pairs([], _, I) -> I;
+add_pairs([], _, I) -> I - 1;
 add_pairs([{Key, Value}|Pairs], OVar, I) ->
     lasp:update(OVar, {add, #{
         id => I,
@@ -25,18 +25,17 @@ add_pairs([_|Pairs], OVar, I) ->
 
 % @pre -
 % @post -
+map_phase([], _) -> 0;
 map_phase(Entries, OVar) ->
-    map_phase(Entries, OVar, 0).
-map_phase([], _, I) -> I;
-map_phase([{IVar, Map}|Entries], OVar, I) ->
-    Values = achlys_util:query(IVar),
-    Pairs = lists:foldl(fun(Value, Acc) ->
-        Acc ++ erlang:apply(Map, [Value])
-    end, [], Values),
-    J = add_pairs(Pairs, OVar, I),
-    map_phase(Entries, OVar, J);
-map_phase([_|Entries], OVar, I) ->
-    map_phase(Entries, OVar, I).
+    Pairs = lists:foldl(fun(Entry, Acc1) ->
+        case Entry of {IVar, Map} ->
+            Values = achlys_util:query(IVar),
+            Acc1 ++ lists:foldl(fun(Value, Acc2) ->
+                Acc2 ++ erlang:apply(Map, [Value])
+            end, [], Values)
+        end
+    end, [], Entries),
+    add_pairs(lists:sort(Pairs), OVar, 1).
 
 % ---------------------------------------------
 % Shuffle phase :
@@ -67,25 +66,6 @@ shuffle_phase(IVar, GetOVar) ->
 % ---------------------------------------------
 % Reduce phase :
 % ---------------------------------------------
-
-% @pre -
-% @post -
-get_unique_id([]) -> none;
-get_unique_id([Pair|Pairs]) ->
-    case Pair of
-        #{id := {_, N}} ->
-            get_unique_id(Pairs, N);
-        #{id := N} ->
-            get_unique_id(Pairs, N)
-    end.
-get_unique_id([], Acc) -> Acc + 1;
-get_unique_id([Pair|Pairs], Acc) ->
-    case Pair of
-        #{id := {_, N}} ->
-            get_unique_id(Pairs, erlang:max(N, Acc));
-        #{id := N} ->
-            get_unique_id(Pairs, erlang:max(N, Acc))
-    end.
 
 % @pre -
 % @post -
@@ -129,14 +109,13 @@ reduce_phase(Key, IVar, Reduce, OVar) ->
             P1 = sets:to_list(Set),
             Values = [Value || #{value := Value} <- P1],
             P2 = erlang:apply(Reduce, [Key, Values]),
-            {
-                add_reduced_pairs(
-                    {Key, get_unique_id(P1)},
-                    sort_pairs(P2),
-                    OVar
-                ),
-                has_changed(P1, P2)
-            }
+            Pairs = add_reduced_pairs(
+                {Key, 1},
+                sort_pairs(P2),
+                OVar
+            ),
+            Status = has_changed(P1, P2),
+            {Pairs, Status}
         end.
 
 % ---------------------------------------------
@@ -196,6 +175,8 @@ choose_node() ->
     Index = rand:uniform(Length),
     [lists:nth(Index, Members)].
 
+% @pre -
+% @post -
 give_task([], _, _, _) -> ok;
 give_task([Key|Keys], Dispatching, Vars, Reduce) ->
     give_task(Key, Dispatching, Vars, Reduce),
@@ -231,17 +212,19 @@ convert_key(Key) when erlang:is_integer(Key) ->
 
 % @pre -
 % @post -
-round(Vars, Round, Reduce, Options) ->
+round(Round, Vars, Reduce, Options) ->
     {IVar, CVar, OVar} = Vars,
     case maps:get(max_round, Options) of
         Max when Round > Max ->
             io:format("Max round reached !~n"),
             format_result(IVar);
         _ ->
-            Dispatching = shuffle_phase(IVar, fun(Key) -> {
-                erlang:list_to_binary(erlang:integer_to_list(Round) ++ convert_key(Key)),
-                state_twopset
-            } end),
+            Dispatching = shuffle_phase(IVar, fun(Key) ->
+                Name = erlang:list_to_binary(
+                    erlang:integer_to_list(Round) ++ convert_key(Key)
+                ), 
+                {Name, state_gset}
+            end),
 
             Keys = maps:keys(Dispatching),
             give_task(Keys, Dispatching, {CVar, OVar}, Reduce),
@@ -249,14 +232,13 @@ round(Vars, Round, Reduce, Options) ->
 
             % TODO: Add timeout here
 
-            lasp:read(CVar, {cardinality, I}),
-            Status = achlys_util:query(CVar),
+            {ok, {_, _, _, {_, Status}}} = lasp:read(CVar, {cardinality, I}),
             J = get_total_cardinality(Status),
             
             % TODO: Add timeout here
             % Groups = get_groups_with_missing_pairs(
             %     achlys_util:query(OVar),
-            %     get_cardinality_per_key(Cardinalities)
+            %     get_cardinality_per_key(Status)
             % ),
             % give_task(Groups, Dispatching, {CVar, OVar}, Reduce),
             % io:format("Missing pairs for group~p~n", [Groups]),
@@ -266,15 +248,20 @@ round(Vars, Round, Reduce, Options) ->
                 true ->
                     io:format("Round ~p~n", [Round]), 
                     format_result(OVar);
-                false -> round({
-                    OVar,
-                    {erlang:list_to_binary(
+                false ->
+                    NextIVar = OVar,
+                    NextCVar = {erlang:list_to_binary(
                         erlang:integer_to_list(Round) ++ "-cvar"
                     ), state_gset},
-                    {erlang:list_to_binary(
+                    NextOVar = {erlang:list_to_binary(
                         erlang:integer_to_list(Round) ++ "-over"
-                    ), state_gset}
-                }, Round + 1, Reduce, Options)
+                    ), state_gset},
+                    round(
+                        Round + 1,
+                        {NextIVar, NextCVar, NextOVar},
+                        Reduce,
+                        Options
+                    )
             end
     end.
 
@@ -286,7 +273,7 @@ schedule(Entries, Reduce) ->
     OVar = {<<"0-ovar">>, state_gset},
     I = map_phase(Entries, IVar),
     lasp:read(IVar, {cardinality, I}),
-    round({IVar, CVar, OVar}, 1, Reduce, #{
+    round(1, {IVar, CVar, OVar}, Reduce, #{
         max_round => 10
     }).
 

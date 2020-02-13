@@ -120,8 +120,9 @@ sum_test() ->
 
     % Expected result:
 
-    % | b | 2 |
-    % | b | 2 |
+    % | c | 2 |
+    % | a | 1 |
+    % | b | 3 |
 
     lists:foreach(fun(Pair) ->
         case Pair of #{key := Key, value := Value} ->
