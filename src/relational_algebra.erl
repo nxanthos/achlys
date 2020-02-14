@@ -52,7 +52,7 @@ natural_join_test() ->
                 c := C
             } -> [{B, #{c => C}}] end
         end}
-    ], fun(Key, Values) -> % Join
+    ], fun(Key, Values, _) -> % Join
         {L1, L2, L3} = split(Values),
         L = natural_join(Key, L1, L2) ++ lists:map(fun(E) ->
             {Key, E}
@@ -88,7 +88,7 @@ count_test() ->
                 [{B, 1}]
             end
         end}
-    ], fun(Key, Values) ->
+    ], fun(Key, Values, _) ->
         [{Key, lists:sum(Values)}]
     end),
 
@@ -114,7 +114,7 @@ sum_test() ->
                 [{B, A}]
             end
         end}
-    ], fun(Key, Values) ->
+    ], fun(Key, Values, _) ->
         [{Key, lists:sum(Values)}]
     end),
 
@@ -140,7 +140,7 @@ filter_test() ->
                 [{B, A}]
             end
         end}
-    ], fun(Key, Values) ->
+    ], fun(Key, Values, _) ->
         lists:foldl(fun(Value, Acc) -> 
             case Value rem 2 == 0 of
                 true -> [{Key, Value}|Acc];
