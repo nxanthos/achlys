@@ -176,6 +176,70 @@ dispatch_tasks(Keys, Dispatching, Vars, Reduce) ->
 
 % @pre -
 % @post -
+await(Fun, Args) ->
+    Pid = self(),
+    erlang:spawn(fun() ->
+        Self = self(),
+        erlang:spawn(fun() ->
+            Self ! erlang:apply(Fun, Args)
+        end),
+        receive Result ->
+            Pid ! {ok, Result}
+        after ?TIMEOUT ->
+            Pid ! {error, timeout}
+        end
+    end),
+    receive Result -> Result end.
+
+% @pre -
+% @post -
+retry(0, _, _) -> {error, max_attempts_reached};
+retry(K, Action, Callback) ->
+    case await(Action, []) of
+        {error, timeout} ->
+            Callback(),
+            retry(K - 1, Action, Callback);
+        Response -> Response
+    end.
+
+% @pre -
+% @post -
+read(ID, N) ->
+    fun() ->
+        {ok, {_, _, _, {_, Values}}} = lasp:read(ID, {cardinality, N}),
+        Values
+    end.
+
+% @pre -
+% @post -
+get_cardinality_per_key(L) ->
+    get_cardinality_per_key(L, #{}).
+get_cardinality_per_key([], Acc) -> Acc;
+get_cardinality_per_key([{Key, Number, _}|T], Acc) ->
+    get_cardinality_per_key(T, maps:put(Key, Number, Acc)).
+
+% @pre -
+% @post -
+get_groups_with_missing_pairs([], Acc) ->
+    maps:keys(Acc);
+get_groups_with_missing_pairs([Pair|Pairs], Acc) ->
+    case Pair of #{id := {Group, _}} ->
+        case maps:get(Group, Acc) of
+            N when N > 1 ->
+                get_groups_with_missing_pairs(
+                    Pairs,
+                    maps:update(Group, N - 1, Acc)
+                );
+            N when N =< 1 ->
+                get_groups_with_missing_pairs(
+                    Pairs,
+                    maps:remove(Group, Acc)
+                )
+        end
+    end.
+
+% @pre -
+% @post -
 round(Round, Pairs, Vars, Reduce, Options) ->
 
     Dispatching = shuffle_phase(Pairs, fun(Key) ->
@@ -195,22 +259,42 @@ round(Round, Pairs, Vars, Reduce, Options) ->
     
     {CVar, OVar} = Vars,
     I = maps:size(Dispatching),
-    {ok, {_, _, _, {_, Info}}} = lasp:read(CVar, {cardinality, I}),
-    J = get_total_cardinality(Info),
-    {ok, {_, _, _, {_, Result}}} = lasp:read(OVar, {cardinality, J}),
 
-    case is_irreductible(Info) of
-        true ->
-            io:format("OVar = ~w Result = ~w~n", [OVar, Result]),
-            Result;
-        false ->
-            NextCVar = {erlang:list_to_binary(
-                erlang:integer_to_list(Round) ++ "-cvar"
-            ), state_gset},
-            NextOVar = {erlang:list_to_binary(
-                erlang:integer_to_list(Round) ++ "-over"
-            ), state_gset},
-            start_round(Round + 1, Result, {NextCVar, NextOVar}, Reduce, Options)
+    case retry(5, read(CVar, I), fun() ->
+        io:format("Resending the task~n")
+    end) of
+        {error, _} ->
+            io:format("Error: Could not get cardinality~n"),
+            [];
+        {ok, Info} ->
+            J = get_total_cardinality(Info),
+            case retry(5, read(OVar, J), fun() ->
+                io:format("Resending the task~n")
+            end) of
+                {error, _} ->
+                    io:format("Error: Could not get the output pairs~n"),
+                    [];
+                {ok, Result} ->
+                    case is_irreductible(Info) of
+                        true ->
+                            io:format("OVar = ~w Result = ~w~n", [OVar, Result]),
+                            Result;
+                        false ->
+                            NextCVar = {erlang:list_to_binary(
+                                erlang:integer_to_list(Round) ++ "-cvar"
+                            ), state_gset},
+                            NextOVar = {erlang:list_to_binary(
+                                erlang:integer_to_list(Round) ++ "-over"
+                            ), state_gset},
+                            start_round(
+                                Round + 1,
+                                Result,
+                                {NextCVar, NextOVar},
+                                Reduce,
+                                Options
+                            )
+                    end
+            end
     end.
 
 % @pre -
