@@ -154,13 +154,19 @@ choose_node() ->
 give_task(Key, N, Vars, Reduce) ->
     {IVar, CVar, OVar} = Vars,
     Node = choose_node(),
-    Task = achlys:declare(mytask, Node, single, fun() ->
+    Name = erlang:unique_integer(), % TODO: How to get a unique id for the task ?
+    Task = achlys:declare(Name, Node, single, fun() ->
         io:format("Starting the reduction~n"),
-        {ok, {_, _, _, {_, Pairs}}} = lasp:read(IVar, {cardinality, N}),
-        {Cardinality, Flag} = reduce_phase(Key, Pairs, Reduce, OVar),
-        lasp:update(CVar, {add,
-            {Key, Cardinality, Flag}
-        }, self())
+        case await(read(IVar, N)) of
+            {error, timeout} ->
+                io:format("Error: Could not get the input variable~n"),
+                [];
+            {ok, Pairs} ->
+                {Cardinality, Flag} = reduce_phase(Key, Pairs, Reduce, OVar),
+                lasp:update(CVar, {add,
+                    {Key, Cardinality, Flag}
+                }, self())
+        end
     end),
     achlys:bite(Task).
 
@@ -176,12 +182,12 @@ dispatch_tasks(Keys, Dispatching, Vars, Reduce) ->
 
 % @pre -
 % @post -
-await(Fun, Args) ->
+await(Action) ->
     Pid = self(),
     erlang:spawn(fun() ->
         Self = self(),
         erlang:spawn(fun() ->
-            Self ! erlang:apply(Fun, Args)
+            Self ! Action()
         end),
         receive Result ->
             Pid ! {ok, Result}
@@ -190,15 +196,12 @@ await(Fun, Args) ->
         end
     end),
     receive Result -> Result end.
-
-% @pre -
-% @post -
-retry(0, _, _) -> {error, max_attempts_reached};
-retry(K, Action, Callback) ->
-    case await(Action, []) of
+await(_, _, 0) -> {error, max_attempts_reached};
+await(Action, OnTimeout, K) -> 
+    case await(Action) of
         {error, timeout} ->
-            Callback(),
-            retry(K - 1, Action, Callback);
+            OnTimeout(),
+            await(Action, OnTimeout, K);
         Response -> Response
     end.
 
@@ -212,80 +215,95 @@ read(ID, N) ->
 
 % @pre -
 % @post -
-get_cardinality_per_key(L) ->
-    get_cardinality_per_key(L, #{}).
-get_cardinality_per_key([], Acc) -> Acc;
-get_cardinality_per_key([{Key, Number, _}|T], Acc) ->
-    get_cardinality_per_key(T, maps:put(Key, Number, Acc)).
+get_groups_with_missing_status(CVar, Keys) ->
+    Status = achlys_util:query(CVar),
+    lists:subtract(Keys, [Key || {Key, _, _} <- Status]).
 
 % @pre -
 % @post -
-get_groups_with_missing_pairs([], Acc) ->
-    maps:keys(Acc);
-get_groups_with_missing_pairs([Pair|Pairs], Acc) ->
-    case Pair of #{id := {Group, _}} ->
-        case maps:get(Group, Acc) of
-            N when N > 1 ->
-                get_groups_with_missing_pairs(
-                    Pairs,
-                    maps:update(Group, N - 1, Acc)
-                );
-            N when N =< 1 ->
-                get_groups_with_missing_pairs(
-                    Pairs,
-                    maps:remove(Group, Acc)
-                )
-        end
+get_cardinality_per_key(Pairs) ->
+    get_cardinality_per_key(Pairs, #{}).
+get_cardinality_per_key([], Acc) -> Acc;
+get_cardinality_per_key([#{id := {Group, _}, key := _, value := _}|T], Acc) ->
+    case maps:is_key(Group, Acc) of
+        true ->
+            NextAcc = maps:update_with(Group, fun(N) -> N + 1 end, Acc),
+            get_cardinality_per_key(T, NextAcc);
+        false ->
+            NextAcc = maps:put(Group, 1, Acc),
+            get_cardinality_per_key(T, NextAcc)
     end.
+
+% @pre -
+% @post -
+get_groups_with_missing_pairs(OVar, Status) ->
+    Pairs = achlys_util:query(OVar),
+    Cardinalities = get_cardinality_per_key(Pairs),
+    lists:foldl(fun({Key, Cardinality, _}, Keys) ->
+        case maps:get(Key, Cardinalities, 0) - Cardinality of
+            M when M < 0 -> [Key|Keys];
+            _ -> Keys
+        end
+        % TODO: If M > 0, we have to much keys, what do we do ?
+    end, [], Status).
+
+% @pre -
+% @post -
+get_next_cvar_id(Round) ->
+    {erlang:list_to_binary(
+        erlang:integer_to_list(Round) ++ "-cvar"
+    ), state_gset}.
+
+% @pre -
+% @post -
+get_next_ovar_id(Round) ->
+    {erlang:list_to_binary(
+        erlang:integer_to_list(Round) ++ "-over"
+    ), state_gset}.
 
 % @pre -
 % @post -
 round(Round, Pairs, Vars, Reduce, Options) ->
 
     Dispatching = shuffle_phase(Pairs, fun(Key) ->
-        Name = erlang:list_to_binary(
-            erlang:integer_to_list(Round) ++ convert_key(Key)
-        ), 
-        {Name, state_gset}
+        {erlang:list_to_binary(erlang:integer_to_list(Round) ++ convert_key(Key)), state_gset}
     end),
 
     Keys = maps:keys(Dispatching),
     dispatch_tasks(Keys, Dispatching, Vars, Reduce),
     
     % Debug :
-    lists:foreach(fun(Info) ->
-        case Info of {_, #{variable := ID}} -> debug(ID) end
+    lists:foreach(fun(Status) ->
+        case Status of {_, #{variable := ID}} -> debug(ID) end
     end, maps:to_list(Dispatching)),
     
     {CVar, OVar} = Vars,
     I = maps:size(Dispatching),
 
-    case retry(5, read(CVar, I), fun() ->
-        io:format("Resending the task~n")
-    end) of
+    case await(read(CVar, I), fun() ->
+        Groups = get_groups_with_missing_status(CVar, Keys),
+        dispatch_tasks(Groups, Dispatching, Vars, Reduce)
+    end, 5) of
         {error, _} ->
-            io:format("Error: Could not get cardinality~n"),
+            io:format("Error: Could not get the status of each node~n"),
             [];
-        {ok, Info} ->
-            J = get_total_cardinality(Info),
-            case retry(5, read(OVar, J), fun() ->
-                io:format("Resending the task~n")
-            end) of
+        {ok, Status} ->
+            J = get_total_cardinality(Status),
+            case await(read(OVar, J), fun() ->
+                Groups = get_groups_with_missing_pairs(OVar, Status),
+                dispatch_tasks(Groups, Dispatching, Vars, Reduce)
+            end, 5) of
                 {error, _} ->
                     io:format("Error: Could not get the output pairs~n"),
                     [];
                 {ok, Result} ->
-                    case is_irreductible(Info) of
+                    case is_irreductible(Status) of
                         true ->
                             io:format("OVar = ~w Result = ~w~n", [OVar, Result]),
                             Result;
                         false ->
-                            NextCVar = {erlang:list_to_binary(
-                                erlang:integer_to_list(Round) ++ "-cvar"
-                            ), state_gset},
-                            NextOVar = {erlang:list_to_binary(
-                                erlang:integer_to_list(Round) ++ "-over"
-                            ), state_gset},
+                            NextCVar = get_next_cvar_id(Round),
+                            NextOVar = get_next_ovar_id(Round),
                             start_round(
                                 Round + 1,
                                 Result,
@@ -312,11 +330,17 @@ schedule(Entries, Reduce) ->
     CVar = {<<"0-cvar">>, state_gset},
     OVar = {<<"0-ovar">>, state_gset},
     N = map_phase(Entries, IVar),
-    {ok, {_, _, _, {_, Pairs}}} = lasp:read(IVar, {cardinality, N}),
-    % io:format("Pairs=~p Cardinality=~p~n", [Pairs, I]),
-    start_round(1, Pairs, {CVar, OVar}, Reduce, #{
-        max_round => 10
-    }).
+    case await(read(IVar, N), fun() ->
+        map_phase(Entries, IVar)
+    end, 5) of
+        {error, _} ->
+            io:format("Error: Could not map the input variables~n"),
+            [];
+        {ok, Pairs} ->
+            start_round(1, Pairs, {CVar, OVar}, Reduce, #{
+                max_round => 10
+            })
+    end.
 
 % ---------------------------------------------
 % Debugging:
