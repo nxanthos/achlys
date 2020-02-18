@@ -222,7 +222,7 @@ test_process() ->
     {ok, R1} = lasp_process:process([Key1, Value1], S1),
     io:format("R1: ~w~n", [R1]),
     {ok, R2} = lasp_process:process([Key2, Value2], S1),
-    io:format("R1: ~w~n", [R2]),
+    io:format("R2: ~w~n", [R2]),
 
     lasp:update(IVar, {add, {Key1, Value1}}, self()),
     lasp:update(IVar, {add, {Key2, Value2}}, self()),
