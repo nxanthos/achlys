@@ -1,6 +1,7 @@
 -module(circuit).
 -export([
     start/0,
+    start_task/0,
     debug/0
 ]).
 
@@ -8,13 +9,13 @@
 % I2 - Input variable
 % O - Output variable
 % Fun - Condition
-build_gate(I1, I2, O, Fun) -> 
+build_gate(S1, S2, O, Fun) -> 
     lasp_process:start_dag_link([
         [ % Read function
-            {I1, fun(ID, Threshold) ->
+            {S1, fun(ID, Threshold) ->
                 lasp:read(ID, Threshold)
             end},
-            {I2, fun(ID, Threshold) ->
+            {S2, fun(ID, Threshold) ->
                 lasp:read(ID, Threshold)
             end}
         ],
@@ -44,8 +45,31 @@ logical_or(I1, I2, O) ->
         V1 or V2
     end).
 
-get_timestamp() ->
+get_timestamp() -> 
     erlang:unique_integer([monotonic, positive]).
+
+start_task() ->
+    Type = state_lwwregister,
+    {ok, {S1, _, _, _}} = lasp:declare({<<"s1">>, Type}, Type),
+    {ok, {S2, _, _, _}} = lasp:declare({<<"s2">>, Type}, Type),
+    {ok, {S3, _, _, _}} = lasp:declare({<<"s3">>, Type}, Type),
+    {ok, {S4, _, _, _}} = lasp:declare({<<"s4">>, Type}, Type),
+    {ok, {S5, _, _, _}} = lasp:declare({<<"s5">>, Type}, Type),
+
+    lasp:update(S1, {set, get_timestamp(), true}, self()),
+    lasp:update(S2, {set, get_timestamp(), false}, self()),
+    lasp:update(S3, {set, get_timestamp(), false}, self()),
+
+    Task = achlys:declare(mytask, all, single, fun() ->
+        logical_and(S1, S2, S4),
+        logical_or(S3, S4, S5),
+
+        lasp:stream(S5, fun(Value) ->
+            io:format("Output=~w~n", [Value])
+        end)
+    end),
+    achlys:bite(Task),
+    ok.
 
 start() ->
 
@@ -70,11 +94,6 @@ start() ->
     end),
 
     % The arity of the transformation function corresponds to the number of read functions in the list. The nth argument of the transformation function will be the result of the nth read function (i.e: in this example, the lasp:read function)
-
-    % timer:sleep(500),
-    % lasp:update(S3, {set, get_timestamp(), true}, self()),
-    % timer:sleep(500),
-    % lasp:update(S3, {set, get_timestamp(), false}, self()),
 
     debug(),
     ok.
