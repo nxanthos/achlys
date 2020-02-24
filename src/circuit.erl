@@ -2,6 +2,10 @@
 -export([
     start/0,
     start_task/0,
+    halfadder/0,
+    fulladder/0,
+    debug_ha/0,
+    debug_fa/0,
     debug/0
 ]).
 
@@ -45,6 +49,29 @@ logical_or(I1, I2, O) ->
         V1 or V2
     end).
 
+% I1 - Input variable
+% I2 - Input variable
+% O - Output variable
+logical_xor(I1, I2, O) ->
+    build_gate(I1, I2, O, fun(V1, V2) ->
+        V1 xor V2
+    end).
+
+half_adder(A, B, S, C) ->
+    logical_xor(A, B, S),
+    logical_and(A, B, C).
+
+full_adder(A, B, Cin, S, Cout) ->
+    % intermediate values
+    Type = state_lwwregister,
+    {ok, {S1, _, _, _}} = lasp:declare({<<"s1">>, Type}, Type),
+    {ok, {C1, _, _, _}} = lasp:declare({<<"c1">>, Type}, Type),
+    {ok, {C2, _, _, _}} = lasp:declare({<<"c2">>, Type}, Type),
+
+    half_adder(A, B, S1, C1),
+    half_adder(S1, Cin, S, C2),
+    logical_or(C1, C2, Cout).
+
 get_timestamp() -> 
     erlang:unique_integer([monotonic, positive]).
 
@@ -59,6 +86,8 @@ start_task() ->
     lasp:update(S1, {set, get_timestamp(), true}, self()),
     lasp:update(S2, {set, get_timestamp(), false}, self()),
     lasp:update(S3, {set, get_timestamp(), false}, self()),
+
+    % (S1 AND S2) OR S3
 
     Task = achlys:declare(mytask, all, single, fun() ->
         logical_and(S1, S2, S4),
@@ -97,6 +126,73 @@ start() ->
 
     debug(),
     ok.
+
+halfadder() ->
+    Type = state_lwwregister,
+    {ok, {A, _, _, _}} = lasp:declare({<<"a">>, Type}, Type),
+    {ok, {B, _, _, _}} = lasp:declare({<<"b">>, Type}, Type),
+    {ok, {S, _, _, _}} = lasp:declare({<<"s">>, Type}, Type),
+    {ok, {C, _, _, _}} = lasp:declare({<<"c">>, Type}, Type),
+
+    lasp:update(A, {set, get_timestamp(), true}, self()),
+    lasp:update(B, {set, get_timestamp(), true}, self()),
+
+    % S = (A XOR B), C = (A AND B)
+
+    Task = achlys:declare(mytask, all, single, fun() ->
+        half_adder(A,B,S,C),
+
+        lasp:stream(S, fun(Value) ->
+            io:format("Sum=~w~n", [Value])
+        end),
+        lasp:stream(C, fun(Value) ->
+            io:format("Carry=~w~n", [Value])
+        end)
+    end),
+    achlys:bite(Task),
+    ok.
+
+fulladder() ->
+    Type = state_lwwregister,
+    {ok, {A, _, _, _}} = lasp:declare({<<"a">>, Type}, Type),
+    {ok, {B, _, _, _}} = lasp:declare({<<"b">>, Type}, Type),
+    {ok, {Cin, _, _, _}} = lasp:declare({<<"cin">>, Type}, Type),
+    {ok, {S, _, _, _}} = lasp:declare({<<"s">>, Type}, Type),
+    {ok, {Cout, _, _, _}} = lasp:declare({<<"cout">>, Type}, Type),
+
+    lasp:update(A, {set, get_timestamp(), true}, self()),
+    lasp:update(B, {set, get_timestamp(), true}, self()),
+    lasp:update(Cin, {set, get_timestamp(), true}, self()),
+
+    Task = achlys:declare(mytask, all, single, fun() ->
+        full_adder(A, B, Cin, S, Cout),
+
+        lasp:stream(S, fun(Value) ->
+            io:format("Sum=~w~n", [Value])
+        end),
+        lasp:stream(Cout, fun(Value) ->
+            io:format("Carry=~w~n", [Value])
+        end)
+    end),
+    achlys:bite(Task),
+    ok.
+
+debug_ha() ->
+    Type = state_lwwregister,
+    {ok, A} = lasp:query({<<"a">>, Type}),
+    {ok, B} = lasp:query({<<"b">>, Type}),
+    {ok, S} = lasp:query({<<"s">>, Type}),
+    {ok, C} = lasp:query({<<"c">>, Type}),
+    io:format("A=~w B=~w S=~w C=~w~n", [A, B, S, C]).
+
+debug_fa() ->
+    Type = state_lwwregister,
+    {ok, A} = lasp:query({<<"a">>, Type}),
+    {ok, B} = lasp:query({<<"b">>, Type}),
+    {ok, Cin} = lasp:query({<<"cin">>, Type}),
+    {ok, S} = lasp:query({<<"s">>, Type}),
+    {ok, Cout} = lasp:query({<<"cout">>, Type}),
+    io:format("A=~w B=~w Cin=~w S=~w Cout=~w~n", [A, B, Cin, S, Cout]).
 
 debug() ->
     Type = state_lwwregister,
