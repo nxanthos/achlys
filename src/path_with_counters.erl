@@ -3,6 +3,47 @@
     schedule/0  
 ]).
 
+% Network configuration:
+
+get_links() ->
+    % Format: 
+    % [
+    %   {Destination, [Source 1, Source 2, ...]},
+    %   {Destination, [Source 1, Source 2, ...]},
+    %   ...
+    % ]
+    [
+        {a, [a]},
+        {b, [a, c, d]},
+        {c, [b, d, e]},
+        {d, [a, b, c, e]},
+        {e, [c, d]}
+    ].
+
+get_costs() ->
+    % Format:
+    % [
+    %   {Destination, Source, Cost},
+    %   {Destination, Source, Cost},
+    %   ...,
+    % ]
+    [
+        {a, a, 0},
+        {b, a, 3},
+        {b, c, 4},
+        {b, d, 2},
+        {c, b, 4},
+        {c, d, 5},
+        {c, e, 6},
+        {d, a, 7},
+        {d, b, 2},
+        {d, c, 5},
+        {d, e, 4},
+        {e, c, 6},
+        {e, d, 4}
+    ].
+
+
 % Helpers :
 
 get_actor() -> 
@@ -61,6 +102,17 @@ gen_tran_funs(N) ->
         get_min(L)
     end, N).
 
+gen_write_fun(Var) ->
+    {Var, fun(ID, Value) ->
+        case lasp:bind(ID, Value) of
+            {error, not_found} ->
+                io:format("Could not set the output variable (~p)!~n", [ID]);
+            {ok, {_, _, _, PNCounter}} ->
+                Count = state_pncounter:query(PNCounter),
+                io:format("Var=~p N=~w~n", [ID, Count])
+        end
+    end}.
+
 sum({state_pncounter, LValue}, {state_pncounter, RValue}) ->
     {state_pncounter, orddict:merge(
         fun(_, {Inc1, Dec1}, {Inc2, Dec2}) ->
@@ -87,100 +139,92 @@ get_min(L) ->
 
 add_connection(Inputs, Costs, Destination) when length(Inputs) == length(Costs) ->
     N = length(Inputs) + length(Costs),
+    ReadFuns = gen_read_funs(Inputs, Costs),
+    TranFuns = gen_tran_funs(N),
+    WriteFun = gen_write_fun(Destination),
+    % io:format("ReadFuns=~p WriteFun=~p~n~n~n", [ReadFuns, WriteFun]),
     lasp_process:start_dag_link([
-        gen_read_funs(Inputs, Costs),
-        gen_tran_funs(N),
-        {Destination, fun(ID, Value) ->
-            case lasp:bind(ID, Value) of
-                {error, not_found} ->
-                    io:format("Could not set the output variable (~p)!~n", [ID]);
-                {ok, {_, _, _, PNCounter}} ->
-                    Count = state_pncounter:query(PNCounter),
-                    io:format("Var=~p N=~w~n", [ID, Count])
-            end,
-            % io:format("Value=~w~n", [Value]),
-            ok
-        end}
+        ReadFuns,
+        TranFuns,
+        WriteFun
     ]).
 
 get_node_id(Name, Level) ->
     erlang:list_to_binary(erlang:atom_to_list(Name) ++ erlang:integer_to_list(Level)).
 
-get_cost_id(A, B) ->
-    case A < B of
-        true ->
-            erlang:list_to_binary(erlang:atom_to_list(A) ++ erlang:atom_to_list(B));
-        false ->
-            erlang:list_to_binary(erlang:atom_to_list(B) ++ erlang:atom_to_list(A))
-    end.
+get_cost_id(Dst, Src) ->
+    erlang:list_to_binary(erlang:atom_to_list(Dst) ++ erlang:atom_to_list(Src)).
 
 link_layer() ->
 
-    Links = [
-        {a, [a]},
-        {b, [a, c, d]},
-        {c, [b, d, e]},
-        {d, [a, b, c, e]},
-        {e, [c, d]}
-    ],
-
-    Costs = [
-        {a, a, 0},
-        {a, b, 3},
-        {a, d, 7},
-        {b, d, 2},
-        {b, c, 7},
-        {c, d, 5},
-        {c, e, 6},
-        {d, e, 4}
-    ],
+    Links = get_links(),
+    Costs = get_costs(),
 
     Type = state_pncounter,
-
-    % Initialize the costs:
-
     Level = 1,
 
-    % Initialize the value:
+    % Initialize the input value:
 
     lists:foreach(fun({Name, _}) ->
         ID = {get_node_id(Name, Level), Type},
+        lasp:declare(ID, Type),
         lasp:update(ID, increment, get_actor())
     end, Links),
 
-    lists:foreach(fun({A, B, Cost}) ->
-        ID = {get_cost_id(A, B), Type},
-        lasp:update(ID, {increment, Cost}, get_actor())
+    % Initialize the cost :
+
+    lists:foreach(fun({Dst, Src, Cost}) ->
+        ID = {get_cost_id(Dst, Src), Type},
+        lasp:declare(ID, Type),
+        lasp:update(ID, {increment, Cost + 1}, get_actor())
     end, Costs),
 
-    lists:foreach(fun({Dst, Src}) ->
-        Destination = {get_node_id(Dst, 2), Type},
-        add_connection(
-            lists:map(fun(Name) ->
-                {get_node_id(Name, Level), Type}
-            end, Src),
-            lists:map(fun(Name) ->
-                {get_cost_id(Name, Dst), Type}
-            end, Src),
-            Destination
-        ),
-        ok
-    end, Links),
-    % debug(),
-    ok.
+    % Add layers :
 
-debug() ->
-    L = [a, b, c, d, e],
-    Level = 1,
-    lists:map(fun(Name) ->
-        ID = {get_node_id(Name, Level), state_pncounter},
-        {ok, N} = lasp:query(ID),
-        io:format("Node=~w Level=~w Value=~w~n", [Name, Level, N])
-    end, L).
+    N = erlang:length(Links),
+    lists:foreach(fun(K) ->
+        lists:foreach(fun({Dst, Src}) ->
+            add_connection(
+                lists:map(fun(Name) -> % Inputs
+                    {get_node_id(Name, K), Type}
+                end, Src),
+                lists:map(fun(Name) -> % Costs
+                    {get_cost_id(Dst, Name), Type}
+                end, Src),
+                {get_node_id(Dst, K + 1), Type}
+            )
+        end, Links)
+    end, lists:seq(1, N - 1)),
+
+    % Debug:
+
+    timer:sleep(2000),
+
+    % lists:foreach(fun(K) ->
+    %     debug_layer(K)
+    % end, lists:seq(1, N)),
+
+    debug_layer(N),
+
+    ok.
 
 % ---
 
 % Debug :
+
+debug_layer(N) ->
+    Type = state_pncounter,
+    lists:foreach(fun({Name, _}) ->
+        Identifier = get_node_id(Name, N),
+        io:format("~p=~w~n", [Identifier, lasp:query({Identifier, Type})])
+    end, get_links()).
+
+debug_cost() ->
+    Type = state_pncounter,
+    lists:foreach(fun({Dst, Src, _}) ->
+        Identifier = get_cost_id(Dst, Src),
+        io:format("~p=~w~n", [Identifier, lasp:query({Identifier, Type})])
+    end, get_costs()).
 
 test_pncounter_read() ->
     
@@ -191,7 +235,7 @@ test_pncounter_read() ->
     
     erlang:spawn(fun() ->
         timer:sleep(500),
-        lasp:update(ID, increment, get_actor())
+        lasp:update(ID, {increment, 1}, get_actor())
     end),
     
     {ok, {ID, Type, Metadata, Value}} = lasp:read(ID, {strict, state_pncounter:new()}),
