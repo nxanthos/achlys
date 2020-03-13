@@ -6,21 +6,6 @@
 % Network configuration:
 
 get_links() ->
-    % Format: 
-    % [
-    %   {Destination, [Source 1, Source 2, ...]},
-    %   {Destination, [Source 1, Source 2, ...]},
-    %   ...
-    % ]
-    [
-        {a, [a]},
-        {b, [a, c, d]},
-        {c, [b, d, e]},
-        {d, [a, b, c, e]},
-        {e, [c, d]}
-    ].
-
-get_costs() ->
     % Format:
     % [
     %   {Destination, Source, Cost},
@@ -42,6 +27,20 @@ get_costs() ->
         {e, c, 6},
         {e, d, 4}
     ].
+
+
+get_predecessors() ->
+    % Format: 
+    % [
+    %   {Destination, [Source 1, Source 2, ...]},
+    %   {Destination, [Source 1, Source 2, ...]},
+    %   ...
+    % ]
+    Orddict = lists:foldl(fun({Dst, Src, _}, Acc) ->
+        orddict:append(Dst, Src, Acc)
+    end, orddict:new(), get_links()),
+    orddict:to_list(Orddict).
+
 
 
 % Helpers :
@@ -157,8 +156,8 @@ get_cost_id(Dst, Src) ->
 
 link_layer() ->
 
+    Predecessors = get_predecessors(),
     Links = get_links(),
-    Costs = get_costs(),
 
     Type = state_pncounter,
     Level = 1,
@@ -169,7 +168,7 @@ link_layer() ->
         ID = {get_node_id(Name, Level), Type},
         lasp:declare(ID, Type),
         lasp:update(ID, increment, get_actor())
-    end, Links),
+    end, Predecessors),
 
     % Initialize the cost :
 
@@ -177,11 +176,11 @@ link_layer() ->
         ID = {get_cost_id(Dst, Src), Type},
         lasp:declare(ID, Type),
         lasp:update(ID, {increment, Cost + 1}, get_actor())
-    end, Costs),
+    end, Links),
 
     % Add layers :
 
-    N = erlang:length(Links),
+    N = erlang:length(Predecessors),
     lists:foreach(fun(K) ->
         lists:foreach(fun({Dst, Src}) ->
             add_connection(
@@ -193,7 +192,7 @@ link_layer() ->
                 end, Src),
                 {get_node_id(Dst, K + 1), Type}
             )
-        end, Links)
+        end, Predecessors)
     end, lists:seq(1, N - 1)),
 
     % Debug:
@@ -217,14 +216,14 @@ debug_layer(N) ->
     lists:foreach(fun({Name, _}) ->
         Identifier = get_node_id(Name, N),
         io:format("~p=~w~n", [Identifier, lasp:query({Identifier, Type})])
-    end, get_links()).
+    end, get_predecessors()).
 
 debug_cost() ->
     Type = state_pncounter,
     lists:foreach(fun({Dst, Src, _}) ->
         Identifier = get_cost_id(Dst, Src),
         io:format("~p=~w~n", [Identifier, lasp:query({Identifier, Type})])
-    end, get_costs()).
+    end, get_links()).
 
 test_pncounter_read() ->
     
