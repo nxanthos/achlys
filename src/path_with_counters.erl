@@ -1,6 +1,8 @@
 -module(path_with_counters).
 -export([
-    schedule/0
+    schedule/0,
+    debug_layer/2,
+    debug_cost/1
 ]).
 
 -define(INFINITE, 1000000).
@@ -131,20 +133,23 @@ init_dag(Destination) ->
 
     % Add layers :
 
-    N = erlang:length(Nodes),
-    lists:foreach(fun(K) ->
-        lists:foreach(fun({Node, Predecessors}) ->
-            add_connection(
-                lists:map(fun(Predecessor) -> % Inputs
-                    {get_node_id(Predecessor, K), Type}
-                end, Predecessors),
-                lists:map(fun(Predecessor) -> % Costs
-                    {get_cost_id(Node, Predecessor), Type}
-                end, Predecessors),
-                {get_node_id(Node, K + 1), Type}
-            )
-        end, Nodes)
-    end, lists:seq(1, N - 1)),
+    Task = achlys:declare(mytask, all, single, fun() ->
+        N = erlang:length(Nodes),
+        lists:foreach(fun(K) ->
+            lists:foreach(fun({Node, Predecessors}) ->
+                add_connection(
+                    lists:map(fun(Predecessor) -> % Inputs
+                        {get_node_id(Predecessor, K), Type}
+                    end, Predecessors),
+                    lists:map(fun(Predecessor) -> % Costs
+                        {get_cost_id(Node, Predecessor), Type}
+                    end, Predecessors),
+                    {get_node_id(Node, K + 1), Type}
+                )
+            end, Nodes)
+        end, lists:seq(1, N - 1))
+    end),
+    achlys:bite(Task),
     ok.
 
 % Debug :
