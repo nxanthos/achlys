@@ -46,6 +46,7 @@ process(Cache, State) ->
 % @pre -
 % @post -
 read(State) ->
+    IVars = maps:get(ivars, State, []),
     {ok, lists:map(fun(IVar) ->
         fun(CacheValue) ->
             % io:format("Cache value: ~w~n", [CacheValue]),
@@ -62,7 +63,7 @@ read(State) ->
                     error
             end
         end
-    end, maps:get(ivars, State, [])), State}.
+    end, IVars), State}.
 
 % Helpers:
 
@@ -83,9 +84,11 @@ apply_transform(Cache, Function) ->
 % @pre -
 % @post -
 start_dag_link(IVars, OVar, Transform) ->
-    Task = achlys:declare(mytask, all, single, fun() ->
-        io:format("Starting the task to preseve the symetrie~n"),
-        achlys_process_sup:start_child([IVars, OVar, Transform])
-    end),
-    io:format("~w~n", [achlys:bite(Task)]),
-    ok.
+    case lasp_unique:unique() of
+        {ok, Name} ->
+            Task = achlys:declare(Name, all, single, fun() ->
+                io:format("Starting the task to preseve the symetrie~n"),
+                achlys_process_sup:start_child([IVars, OVar, Transform])
+            end),
+            achlys:bite(Task)
+    end.

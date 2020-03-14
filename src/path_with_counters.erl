@@ -1,6 +1,6 @@
 -module(path_with_counters).
 -export([
-    schedule/0  
+    schedule/0
 ]).
 
 -define(INFINITE, 1000000).
@@ -57,77 +57,18 @@ get_actor() ->
         partisan_util:gensym(self())
     }.
 
-args_to_list(Fun, 2) -> 
-    fun(A, B) ->
-        {_, _, _, V1} = A,
-        {_, _, _, C1} = B,
-        Fun([{V1, C1}])
-    end;
-args_to_list(Fun, 4) -> 
-    fun(A, B, C, D) ->
-        {_, _, _, I1} = A,
-        {_, _, _, I2} = B,
-        {_, _, _, C1} = C,
-        {_, _, _, C2} = D,
-        Fun([{I1, C1}, {I2, C2}])
-    end;
-args_to_list(Fun, 6) -> 
-    fun(A, B, C, D, E, F) ->
-        {_, _, _, I1} = A,
-        {_, _, _, I2} = B,
-        {_, _, _, I3} = C,
-        {_, _, _, C1} = D,
-        {_, _, _, C2} = E,
-        {_, _, _, C3} = F,
-        Fun([{I1, C1}, {I2, C2}, {I3, C3}])
-    end;
-args_to_list(Fun, 8) -> 
-    fun(A, B, C, D, E, F, G, H) ->
-        {_, _, _, I1} = A,
-        {_, _, _, I2} = B,
-        {_, _, _, I3} = C,
-        {_, _, _, I4} = D,
-        {_, _, _, C1} = E,
-        {_, _, _, C2} = F,
-        {_, _, _, C3} = G,
-        {_, _, _, C4} = H,
-        Fun([{I1, C1}, {I2, C2}, {I3, C3}, {I4, C4}])
-    end.
-
-gen_read_funs(Inputs, Costs) ->
-    lists:map(fun(Var) ->
-        {Var, fun(ID, Threshold) ->
-            lasp:read(ID, Threshold)
-        end}
-    end, Inputs ++ Costs).
-
-gen_tran_funs(N) ->
-    args_to_list(fun(L) ->
-        get_min(L)
-    end, N).
-
-gen_write_fun(Var) ->
-    {Var, fun(ID, Value) ->
-        case lasp:bind(ID, Value) of
-            {error, not_found} ->
-                io:format("Could not set the output variable (~p)!~n", [ID]);
-            {ok, {_, _, _, PNCounter}} ->
-                Count = state_pncounter:query(PNCounter),
-                io:format("Var=~p N=~w~n", [ID, Count])
-        end
-    end}.
+partition(Values) ->
+    N = erlang:length(Values),
+    {L1, L2} = lists:split(erlang:trunc(N / 2), Values),
+    lists:zip(L1, L2).
 
 add_connection(Inputs, Costs, Destination) when length(Inputs) == length(Costs) ->
-    N = length(Inputs) + length(Costs),
-    ReadFuns = gen_read_funs(Inputs, Costs),
-    TranFuns = gen_tran_funs(N),
-    WriteFun = gen_write_fun(Destination),
-    % io:format("ReadFuns=~p WriteFun=~p~n~n~n", [ReadFuns, WriteFun]),
-    lasp_process:start_dag_link([
-        ReadFuns,
-        TranFuns,
-        WriteFun
-    ]).
+    achlys_process:start_dag_link(
+        Inputs ++ Costs, Destination,
+        fun(Results) ->
+            get_min(partition(Results))
+        end
+    ).
 
 sum({state_pncounter, LValue}, {state_pncounter, RValue}) ->
     {state_pncounter, orddict:merge(
@@ -171,7 +112,7 @@ init_dag(Destination) ->
         Name = get_node_id(Node, 1),
         ID = {Name, Type},
         case Node of
-            a ->
+            Destination ->
                 Value = 1,
                 lasp:update(ID, {increment, Value}, get_actor());
             _ ->
@@ -225,7 +166,7 @@ debug_cost(Destination) ->
 schedule() ->
     Destination = a,
     N = 5,
-    init_dag(a),
+    init_dag(Destination),
     timer:sleep(2000),
     % lists:foreach(fun(K) ->
     %     debug_layer(Destination, K)
