@@ -6,6 +6,7 @@
     test_distributed_fold/0,
     test_dag_link/0,
     test_process/0,
+    test_min_with_dag/0,
     debug/2
 ]).
 
@@ -75,6 +76,9 @@ test_fold() ->
 
     {ok, {IVar, _, _, _}} = lasp:declare(orset),
     {ok, {OVar, _, _, _}} = lasp:declare(pncounter),
+
+    io:format("IVar: ~p~n", [lasp:query(IVar)]),
+    io:format("OVar: ~p~n", [lasp:query(OVar)]),
 
     N = 10,
     achlys_util:repeat(N, fun(K) ->
@@ -159,7 +163,7 @@ test_dag_link() ->
         end}],
         fun(Tuple) -> % Transformation function
             io:format("Tuple: ~p~n", [Tuple]),
-            case Tuple of {ID, Type, Metadata, {_, Values}} ->
+            case Tuple of {ID, Type, Metadata, Values} ->
                 io:format("Transform ID: ~p~n", [ID]),
                 io:format("Transform Type: ~p~n", [Type]),
                 io:format("Transform Metadata: ~p~n", [Metadata]),
@@ -170,7 +174,8 @@ test_dag_link() ->
         {OVar, fun(ID, Values) -> % Write function
             io:format("Write OVar: ~p~n", [ID]),
             io:format("Write Value: ~p~n", [Values]),
-            lasp:update(ID, {add, Values}, self())
+            lasp:bind(ID, Values)
+            % lasp:update(ID, {add, Values}, self())
         end}
     ]),
 
@@ -181,6 +186,84 @@ test_dag_link() ->
 
     debug(IVar, "ivar"),
     debug(OVar, "ovar"),
+
+    % dataflow:test_dag_link().
+    ok.
+
+get_timestamp() -> 
+    erlang:unique_integer([monotonic, positive]).    
+
+test_min_with_dag() ->
+
+    Type = state_lwwregister,
+    {ok, {A, _, _, _}} = lasp:declare({<<"a">>, Type}, Type),
+    {ok, {B, _, _, _}} = lasp:declare({<<"b">>, Type}, Type),
+    {ok, {C, _, _, _}} = lasp:declare({<<"c">>, Type}, Type),
+    {ok, {D, _, _, _}} = lasp:declare({<<"d">>, Type}, Type),
+
+    lasp_process:start_dag_link([ % Read function
+        [{A, fun(ID, Threshold) ->
+            lasp:read(ID, Threshold)
+        end},
+        {B, fun(ID, Threshold) ->
+            lasp:read(ID, Threshold)
+        end},
+        {C, fun(ID, Threshold) ->
+            lasp:read(ID, Threshold)
+        end}],
+        fun(T1, T2, T3) -> % Transformation function
+            {_, _, _, V1} = T1,
+            {_, _, _, V2} = T2,
+            {_, _, _, V3} = T3,
+            [V1, V2, V3]
+        end,
+        {D, fun(ID, Values) -> % Write function
+            io:format("Write OVar: ~p~n", [ID]),
+            io:format("Write Value: ~p~n", [Values]),
+            L = lists:filter(fun(Value) ->
+                case Value of {_, {_, E}} ->
+                    not (E == undefined)
+                end
+            end, Values),
+            case L of [H|T] ->
+                Min = lists:foldl(fun(Current, Minimum) ->
+                    case {Current, Minimum} of {
+                        {_, {_, E1}},
+                        {_, {_, E2}}
+                    } ->
+                        case E1 < E2 of
+                            true -> Current;
+                            false -> Minimum
+                        end
+                    end
+                end, H, T),
+                lasp:bind(ID, Min)
+            end
+        end}
+    ]),
+
+    % Update the variable: 
+
+    Debug = fun() ->
+        debug(A, "a"),
+        debug(B, "b"),
+        debug(C, "c"),
+        debug(D, "d")
+    end,
+
+    lasp:update(A, {set, get_timestamp(), 0}, self()),
+    lasp:update(B, {set, get_timestamp(), 1}, self()),
+    lasp:update(C, {set, get_timestamp(), 2}, self()),
+    
+    Debug(),
+
+    timer:sleep(2000),
+    lasp:update(A, {set, get_timestamp(), -42}, self()),
+    timer:sleep(2000),
+
+    Debug(),
+
+    % dataflow:test_min_with_dag().
     ok.
 
 % @pre -
@@ -219,6 +302,7 @@ test_process() ->
     % arguments that will be passed to the transformation function. The arity
     % of the transformation function will have to correspond to the number of
     % items present in the list.
+
     {ok, R1} = lasp_process:process([Key1, Value1], S1),
     io:format("R1: ~w~n", [R1]),
     {ok, R2} = lasp_process:process([Key2, Value2], S1),
