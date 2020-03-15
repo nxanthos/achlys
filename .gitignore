@@ -60,3 +60,7 @@ achlys-0.3.2.tar.gz
 achlys.iml
 
 rebar.lock
+
+default.env
+
+rebarconfig.json
