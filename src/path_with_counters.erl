@@ -1,6 +1,7 @@
 -module(path_with_counters).
 -export([
-    schedule/0,
+    schedule/1,
+    get_path/2,
     debug_layer/2,
     debug_cost/1
 ]).
@@ -38,7 +39,7 @@ get_links(Destination) ->
     end, get_links()),
     [{Destination, Destination, 0}|Links].
 
-% Format: 
+% Format:
 % [
 %   {Node, [Predecessor 1, Predecessor 2, ...]},
 %   {Node, [Predecessor 1, Predecessor 2, ...]},
@@ -50,6 +51,19 @@ get_nodes(Destination) ->
     end, orddict:new(), get_links(Destination)),
     orddict:to_list(Orddict).
 
+% Format:
+% Nodes = [
+%   {Node, [Predecessor 1, Predecessor 2, ...]},
+%   {Node, [Predecessor 1, Predecessor 2, ...]},
+%   ...
+% ]
+get_predecessors(Nodes, Name) ->
+    Predicate = fun({Node, _}) -> Node == Name end,
+    case lists:search(Predicate, Nodes) of
+        {value, {_, Predecessors}} -> Predecessors;
+        _ -> []
+    end.
+
 % Helpers :
 
 get_actor() -> 
@@ -59,16 +73,36 @@ get_actor() ->
         partisan_util:gensym(self())
     }.
 
+get_min(Predicate, L) ->
+    case L of [H|T] ->
+        lists:foldl(fun(A, B) ->
+            case Predicate(A, B) of true -> A; false -> B end
+        end, H, T)
+    end.
+
+% Format:
+% [
+%   {Value, Cost},
+%   {Value, Cost},
+%   ...
+% ]
 partition(Values) ->
     N = erlang:length(Values),
     {L1, L2} = lists:split(erlang:trunc(N / 2), Values),
     lists:zip(L1, L2).
 
-add_connection(Inputs, Costs, Destination) when length(Inputs) == length(Costs) ->
+add_connection(Values, Costs, Destination) when length(Values) == length(Costs) ->
     achlys_process:start_dag_link(
-        Inputs ++ Costs, Destination,
+        Values ++ Costs, Destination,
         fun(Results) ->
-            get_min(partition(Results))
+            List = lists:map(fun({Value, Cost}) ->
+                sum(Value, Cost)
+            end, partition(Results)),
+            get_min(fun(A, B) ->
+                V1 = state_pncounter:query(A),
+                V2 = state_pncounter:query(B),
+                V1 < V2
+            end, List)
         end
     ).
 
@@ -81,102 +115,135 @@ sum({state_pncounter, LValue}, {state_pncounter, RValue}) ->
         RValue
     )}.
 
-get_min(L) ->
-    case L of [{I1, C1}|T] ->
-        S1 = sum(I1, C1),
-        N1 = state_pncounter:query(S1),
-        {S3, _} = lists:foldl(fun({I2, C2}, {_, N3}=Acc) ->
-            S2 = sum(I2, C2),
-            N2 = state_pncounter:query(S2),
-            case N2 of
-                _ when N2 < N3 -> {S2, N2};
-                _ -> Acc
-            end
-        end, {S1, N1}, T),
-        S3
-    end.
-
 get_node_id(Name, Level) ->
-    erlang:list_to_binary(erlang:atom_to_list(Name) ++ erlang:integer_to_list(Level)).
+    Identifier = erlang:list_to_binary(erlang:atom_to_list(Name) ++ erlang:integer_to_list(Level)), 
+    {Identifier, state_pncounter}.
 
-get_cost_id(Dst, Src) ->
-    erlang:list_to_binary(erlang:atom_to_list(Dst) ++ erlang:atom_to_list(Src)).
+get_cost_id(A, B) ->
+    Identifier = case A < B of
+        true ->
+            erlang:atom_to_list(A) ++ erlang:atom_to_list(B);
+        false ->
+            erlang:atom_to_list(B) ++ erlang:atom_to_list(A)
+    end,
+    {erlang:list_to_binary(Identifier), state_pncounter}.
+
+% Format:
+% [
+%   {{Name, Type}, Cost},
+%   {{Name, Type}, Cost},
+%   ...
+% ]
+get_initial_costs(Destination) ->
+    Links = get_links(Destination),
+    Set = lists:foldl(fun(Link, Acc) ->
+        case Link of
+            {Dst, Src, _} when Dst >= Src ->
+                sets:add_element(Link, Acc);
+            _ -> Acc
+        end
+    end, sets:new(), Links),
+    lists:map(fun({Dst, Src, Cost}) ->
+        ID = get_cost_id(Dst, Src),
+        {ID, Cost}
+    end, sets:to_list(Set)).
 
 init_dag(Destination) ->
 
-    Type = state_pncounter,
     Nodes = get_nodes(Destination),
-    Links = get_links(Destination),
 
-    % Initialize the input value:
+    % Initialize the input value of the first layer:
 
     lists:foreach(fun({Node, _}) ->
-        Name = get_node_id(Node, 1),
-        ID = {Name, Type},
-        case Node of
-            Destination ->
-                Value = 1,
-                lasp:update(ID, {increment, Value}, get_actor());
-            _ ->
-                Value = ?INFINITE,
-                lasp:update(ID, {increment, Value}, get_actor())
-        end
+        ID = get_node_id(Node, 1),
+        Value = case Node of
+            _ when Node == Destination -> 1;
+            _ -> ?INFINITE
+        end,
+        lasp:update(ID, {increment, Value}, get_actor())
     end, Nodes),
 
     % Initialize the cost :
 
-    lists:foreach(fun({Dst, Src, Cost}) ->
-        ID = {get_cost_id(Dst, Src), Type},
-        lasp:declare(ID, Type),
+    lists:foreach(fun({ID, Cost}) ->
         lasp:update(ID, {increment, Cost + 1}, get_actor())
-    end, Links),
+    end, get_initial_costs(Destination)),
 
     % Add layers :
 
-    Task = achlys:declare(mytask, all, single, fun() ->
-        N = erlang:length(Nodes),
-        lists:foreach(fun(K) ->
-            lists:foreach(fun({Node, Predecessors}) ->
-                add_connection(
-                    lists:map(fun(Predecessor) -> % Inputs
-                        {get_node_id(Predecessor, K), Type}
-                    end, Predecessors),
-                    lists:map(fun(Predecessor) -> % Costs
-                        {get_cost_id(Node, Predecessor), Type}
-                    end, Predecessors),
-                    {get_node_id(Node, K + 1), Type}
-                )
-            end, Nodes)
-        end, lists:seq(1, N - 1))
-    end),
-    achlys:bite(Task),
+    N = erlang:length(Nodes),
+    lists:foreach(fun(K) ->
+        lists:foreach(fun({Node, Predecessors}) ->
+            add_connection(
+                lists:map(fun(Predecessor) -> % Values
+                    get_node_id(Predecessor, K)
+                end, Predecessors),
+                lists:map(fun(Predecessor) -> % Costs
+                    get_cost_id(Node, Predecessor)
+                end, Predecessors),
+                get_node_id(Node, K + 1)
+            )
+        end, Nodes)
+    end, lists:seq(1, N - 1)),
     ok.
+
+search_path(_, _, [], _, Path) -> Path;
+search_path(_, _, _, Level, Path) when Level =< 0 -> Path;
+search_path(Destination, Nodes, Candidates, Level, Path) ->
+    Values = lists:map(fun(Name) ->
+        ID = get_node_id(Name, Level),
+        {ok, Value} = lasp:query(ID),
+        {Name, Value}
+    end, Candidates),
+    Predicate = fun({_, V1}, {_, V2}) -> V1 < V2 end,
+    case get_min(Predicate, Values) of
+        {_, Value} when Value >= ?INFINITE ->
+            no_solution;
+        {_, Value} when Value == 0 ->
+            no_solution;
+        {Name, Value} when Name == Destination ->
+            Path ++ [{Name, Value - Level}];
+        {Name, Value} ->
+            NextCandidates = get_predecessors(Nodes, Name),
+            search_path(
+                Destination,
+                Nodes,
+                NextCandidates,
+                Level - 1,
+                Path ++ [{Name, Value - Level}]
+            )
+    end.
+
+get_path(Source, Destination) ->
+    Nodes = get_nodes(Destination),
+    Level = erlang:length(Nodes),
+    Path = search_path(Destination, Nodes, [Source], Level, []).
 
 % Debug :
 
 debug_layer(Destination, N) ->
-    Type = state_pncounter,
     lists:foreach(fun({Name, _}) ->
-        Identifier = get_node_id(Name, N),
-        io:format("~p=~w~n", [Identifier, lasp:query({Identifier, Type})])
+        ID = get_node_id(Name, N),
+        {Identifier, _} = ID,
+        io:format("~p=~w~n", [Identifier, lasp:query(ID)])
     end, get_nodes(Destination)).
 
 debug_cost(Destination) ->
-    Type = state_pncounter,
-    lists:foreach(fun({Dst, Src, _}) ->
-        Identifier = get_cost_id(Dst, Src),
-        io:format("~p=~w~n", [Identifier, lasp:query({Identifier, Type})])
-    end, get_links(Destination)).
+    lists:foreach(fun({ID, _}) ->
+        {Identifier, _} = ID,
+        io:format("~p=~w~n", [Identifier, lasp:query(ID)])
+    end, get_initial_costs(Destination)).
 
-schedule() ->
-    Destination = a,
-    N = 5,
+schedule(Destination) ->
     init_dag(Destination),
     timer:sleep(2000),
     % lists:foreach(fun(K) ->
     %     debug_layer(Destination, K)
     % end, lists:seq(1, N)),
+    N = 5,
     debug_layer(Destination, N),
     ok.
 
-% path_with_counters:schedule().
+% Example:
+% path_with_counters:schedule(a).
+% path_with_counters:get_path(b, a).
