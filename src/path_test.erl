@@ -1,6 +1,11 @@
 -module(path_test).
 -export([
-    schedule/0  
+    test_gcounter_read/0,
+    test_gcounter_sum/0,
+    test_gcounter_min/0,
+    test_gcounter_max/0,
+    test_gcounter_dag/0,
+    test_achlys_process/0
 ]).
 
 % Helpers:
@@ -12,40 +17,31 @@ get_actor() ->
         partisan_util:gensym(self())
     }.
 
-sum({state_pncounter, LValue}, {state_pncounter, RValue}) ->
-    {state_pncounter, orddict:merge(
-        fun(_, {Inc1, Dec1}, {Inc2, Dec2}) ->
-            {Inc1 + Inc2, Dec1 + Dec2}
-        end,
-        LValue,
-        RValue
-    )}.
+% Tests:
 
-% Test:
-
-test_pncounter_read() ->
+test_gcounter_read() ->
     
-    Type = state_pncounter,
+    Type = state_gcounter,
     ID = {<<"counter">>, Type},
     
     lasp:declare(ID, Type),
     
     erlang:spawn(fun() ->
         timer:sleep(500),
-        lasp:update(ID, {increment, 1}, get_actor())
+        lasp:update(ID, {increment, 5}, get_actor())
     end),
     
-    {ok, {ID, Type, Metadata, Value}} = lasp:read(ID, {strict, state_pncounter:new()}),
-    N = state_pncounter:query(Value),
+    {ok, {ID, Type, Metadata, Value}} = lasp:read(ID, {strict, state_gcounter:new()}),
+    N = state_gcounter:query(Value),
 
     io:format("ID=~w~nType=~w~nMetadata=~w~nvalue=~w~n", [ID, Type, Metadata, Value]),
     io:format("N=~w~n", [N]),
     
     ok.
 
-test_counter_sum() ->
+test_gcounter_sum() ->
 
-    Type = state_pncounter,
+    Type = state_gcounter,
     A = {<<"a">>, Type},
     B = {<<"b">>, Type},
     C = {<<"c">>, Type},
@@ -57,21 +53,63 @@ test_counter_sum() ->
     % Update:
 
     lasp:update(A, {increment, 1}, get_actor()),
-    lasp:update(A, {decrement, 5}, get_actor()),
     lasp:update(B, {increment, 2}, get_actor()),
-    lasp:update(B, {decrement, 2}, get_actor()),
 
     {ok, {_, _, _, LValue}} = lasp:read(A, {strict, undefined}),
     {ok, {_, _, _, RValue}} = lasp:read(B, {strict, undefined}),
-    {ok, {_, _, _, Value}} = lasp:bind(C, sum(LValue, RValue)),
+    {ok, {_, _, _, Value}} = lasp:bind(C, state_gcounter_ext:sum(LValue, RValue)),
 
-    N = state_pncounter:query(Value),
+    N = state_gcounter:query(Value),
     io:format("N=~w~n", [N]),
     ok.
 
-test_pncounter_dag() ->
+test_gcounter_min() ->
 
-    Type = state_pncounter,
+    Type = state_gcounter,
+    A = {<<"a">>, Type},
+    B = {<<"b">>, Type},
+    C = {<<"c">>, Type},
+
+    lasp:declare(A, Type),
+    lasp:declare(B, Type),
+    lasp:declare(C, Type),
+
+    lasp:update(A, {increment, 1}, get_actor()),
+    lasp:update(B, {increment, 2}, get_actor()),
+
+    {ok, {_, _, _, LValue}} = lasp:read(A, {strict, undefined}),
+    {ok, {_, _, _, RValue}} = lasp:read(B, {strict, undefined}),
+    {ok, {_, _, _, Value}} = lasp:bind(C, state_gcounter_ext:min(LValue, RValue, min)),
+
+    N = state_gcounter:query(Value),
+    io:format("N=~w~n", [N]),
+    ok.
+
+test_gcounter_max() ->
+
+    Type = state_gcounter,
+    A = {<<"a">>, Type},
+    B = {<<"b">>, Type},
+    C = {<<"c">>, Type},
+
+    lasp:declare(A, Type),
+    lasp:declare(B, Type),
+    lasp:declare(C, Type),
+
+    lasp:update(A, {increment, 1}, get_actor()),
+    lasp:update(B, {increment, 2}, get_actor()),
+
+    {ok, {_, _, _, LValue}} = lasp:read(A, {strict, undefined}),
+    {ok, {_, _, _, RValue}} = lasp:read(B, {strict, undefined}),
+    {ok, {_, _, _, Value}} = lasp:bind(C, state_gcounter_ext:max(LValue, RValue, max)),
+
+    N = state_gcounter:query(Value),
+    io:format("N=~w~n", [N]),
+    ok.
+
+test_gcounter_dag() ->
+
+    Type = state_gcounter,
     A = {<<"a">>, Type},
     B = {<<"b">>, Type},
     C = {<<"c">>, Type},
@@ -92,7 +130,7 @@ test_pncounter_dag() ->
         fun(R1, R2) ->
             {_, _, _, LValue} = R1,
             {_, _, _, RValue} = R2,
-            sum(LValue, RValue)
+            state_gcounter_ext:sum(LValue, RValue)
         end,
         {C, fun(ID, Value) -> % Write function
             lasp:bind(ID, Value)
@@ -116,9 +154,9 @@ test_pncounter_dag() ->
     io:format("C=~w~n", [lasp:query(C)]),
     ok.
 
-test_distributed_sum_counter() ->
+test_achlys_process() ->
 
-    Type = state_pncounter,
+    Type = state_gcounter,
     A = {<<"a">>, Type},
     B = {<<"b">>, Type},
     C = {<<"c">>, Type},
@@ -127,43 +165,22 @@ test_distributed_sum_counter() ->
     lasp:declare(B, Type),
     lasp:declare(C, Type),
 
-    lasp_process:start_dag_link([
-        [
-            {A, fun(ID, Threshold) ->
-                lasp:read(ID, Threshold)
-            end},
-            {B, fun(ID, Threshold) ->
-                lasp:read(ID, Threshold)
-            end}
-        ],
-        fun(R1, R2) ->
-            {_, _, _, LValue} = R1,
-            {_, _, _, RValue} = R2,
-            sum(LValue, RValue)
-        end,
-        {C, fun(ID, Value) ->
-            lasp:bind(ID, Value)
-        end}
-    ]),
+    achlys_process:start_dag_link(
+        [A, B], C,
+        fun([GSet1, GSet2]) ->
+            state_gcounter_ext:sum(GSet1, GSet2)
+        end
+    ),
 
     lasp:stream(C, fun(Sum) ->
         io:format("Sum=~w~n", [Sum])    
     end),
 
-    Task = achlys:declare(mytask, all, single, fun() ->
-        io:format("Executing the task~n"),
+    erlang:spawn(fun() ->
+        timer:sleep(1000),
         lasp:update(A, {increment, 1}, get_actor()),
-        lasp:update(A, {decrement, 5}, get_actor()),
-        lasp:update(B, {increment, 2}, get_actor()),
-        lasp:update(B, {decrement, 2}, get_actor())
+        timer:sleep(1000),
+        lasp:update(B, {increment, 2}, get_actor())
     end),
 
-    achlys:bite(Task),
-    ok.
-
-schedule() ->
-    % test_pncounter_read(),
-    test_pncounter_dag(),
-    % test_counter_sum(),
-    % test_distributed_sum_counter(),
     ok.

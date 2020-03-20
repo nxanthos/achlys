@@ -14,11 +14,11 @@
 
 % @pre -
 % @post -
-init([IVars, OVar, Transform]) ->
+init([IVars, OVar, Fun]) ->
     {ok, #{
         ivars => IVars,
         ovar => OVar,
-        transform => Transform
+        function => Fun
     }}.
 
 % @pre -
@@ -30,9 +30,9 @@ process(Cache, State) ->
         false ->
             case State of #{
                 ovar := OVar,
-                transform := Transform
+                function := Fun
             } ->
-                Result = apply_transform(Cache, Transform),
+                Result = erlang:apply(Fun, [get_values(Cache)]),
                 case lasp:bind(OVar, Result) of
                     {error, not_found} ->
                         io:format("Could not set the output variable (~p)!~n", [OVar]),
@@ -48,47 +48,47 @@ process(Cache, State) ->
 read(State) ->
     IVars = maps:get(ivars, State, []),
     {ok, lists:map(fun(IVar) ->
-        fun(CacheValue) ->
-            % io:format("Cache value: ~w~n", [CacheValue]),
-            Value = case CacheValue of
-                undefined -> undefined;
-                {_, _, _, V} -> V
-            end,
-            case lasp:read(IVar, {strict, Value}) of
-                {ok, Result} ->
-                    % io:format("Read result: ~w~n", [Result]),
-                    Result;
-                {error, not_found} ->
-                    io:format("Unkonwn variable~n"),
-                    error
-            end
-        end
+        gen_read_fun(IVar)
     end, IVars), State}.
 
 % Helpers:
 
 % @pre -
 % @post -
-apply_transform(Cache, Function) ->
-    erlang:apply(Function, [
-        lists:map(fun(Tuple) ->
-            case Tuple of
-                {_, _, _, Value} -> Value;
-                _ -> Tuple
-            end
-        end, Cache)
-    ]).
+gen_read_fun(IVar) ->
+    fun(CacheValue) ->
+        Value = case CacheValue of
+            undefined -> undefined;
+            {_, _, _, V} -> V
+        end,
+        case lasp:read(IVar, {strict, Value}) of
+            {ok, Result} ->
+                Result;
+            {error, not_found} ->
+                io:format("Unknown variable~n"),
+                error
+        end
+    end.
+
+% @pre -
+% @post -
+get_values(Cache) ->
+    lists:map(fun(Tuple) ->
+        case Tuple of
+            {_, _, _, Value} -> Value;
+            _ -> Tuple
+        end
+    end, Cache).
 
 % API:
 
 % @pre -
 % @post -
-start_dag_link(IVars, OVar, Transform) ->
+start_dag_link(IVars, OVar, Fun) ->        
     case lasp_unique:unique() of
         {ok, Name} ->
             Task = achlys:declare(Name, all, single, fun() ->
-                io:format("Starting the task to preseve the symetrie~n"),
-                achlys_process_sup:start_child([IVars, OVar, Transform])
+                achlys_process_sup:start_child([IVars, OVar, Fun])
             end),
             achlys:bite(Task)
     end.

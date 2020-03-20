@@ -96,28 +96,19 @@ add_connection(Values, Costs, Destination) when length(Values) == length(Costs) 
         Values ++ Costs, Destination,
         fun(Results) ->
             List = lists:map(fun({Value, Cost}) ->
-                sum(Value, Cost)
+                state_gcounter_ext:sum(Value, Cost)
             end, partition(Results)),
-            get_min(fun(A, B) ->
-                V1 = state_pncounter:query(A),
-                V2 = state_pncounter:query(B),
-                V1 < V2
-            end, List)
+            case List of [H|T] ->
+                lists:foldl(fun(A, B) ->
+                    state_gcounter_ext:min(A, B, min)
+                end, H, T)
+            end
         end
     ).
 
-sum({state_pncounter, LValue}, {state_pncounter, RValue}) ->
-    {state_pncounter, orddict:merge(
-        fun(_, {Inc1, Dec1}, {Inc2, Dec2}) ->
-            {Inc1 + Inc2, Dec1 + Dec2}
-        end,
-        LValue,
-        RValue
-    )}.
-
 get_node_id(Name, Level) ->
     Identifier = erlang:list_to_binary(erlang:atom_to_list(Name) ++ erlang:integer_to_list(Level)), 
-    {Identifier, state_pncounter}.
+    {Identifier, state_gcounter}.
 
 get_cost_id(A, B) ->
     Identifier = case A < B of
@@ -126,7 +117,7 @@ get_cost_id(A, B) ->
         false ->
             erlang:atom_to_list(B) ++ erlang:atom_to_list(A)
     end,
-    {erlang:list_to_binary(Identifier), state_pncounter}.
+    {erlang:list_to_binary(Identifier), state_gcounter}.
 
 % Format:
 % [
