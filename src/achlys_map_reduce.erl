@@ -13,7 +13,17 @@
 
 % @pre -
 % @post -
-filter_pairs(Pairs) ->
+get_values(ID) ->
+    % TODO: Add more types
+    case ID of
+        {_, state_gset} ->
+            {ok, Set} = lasp:query(ID),
+            sets:to_list(Set)
+    end.
+
+% @pre -
+% @post -
+remove_invalid_pairs(Pairs) ->
     lists:filter(fun(Pair) -> 
         case Pair of
             {_, _} -> true;
@@ -23,14 +33,14 @@ filter_pairs(Pairs) ->
 
 % @pre -
 % @post -
-get_values({IVar, Map}) ->
-    Values = achlys_util:query(IVar),
+get_pairs({IVar, Map}) ->
+    Values = get_values(IVar),
     lists:foldl(fun(Value, Pairs) ->
         case erlang:apply(Map, [Value]) of
             Result when erlang:is_list(Result) ->
-                Pairs ++ filter_pairs(Result);
-            {_, _} = Result ->
-                Pairs ++ [Result]
+                Pairs ++ remove_invalid_pairs(Result);
+            {_, _} = Pair ->
+                Pairs ++ [Pair]
         end
     end, [], Values).
 
@@ -45,12 +55,8 @@ sort_pairs(Pair) when erlang:is_tuple(Pair) ->
 % @post -
 map_phase([], _) -> 0;
 map_phase(Entries, OVar) ->
-    P1 = lists:foldl(fun(Entry, Values) ->
-        case Entry of
-            {{_, Type}, Fun} when erlang:is_atom(Type), erlang:is_function(Fun) ->
-                Values ++ get_values(Entry);
-            _ -> Values
-        end
+    P1 = lists:foldl(fun(Entry, Pairs) ->
+        Pairs ++ get_pairs(Entry)
     end, [], Entries),
     P2 = sort_pairs(P1),
     lists:foldl(fun(Pair, K) ->
@@ -69,25 +75,25 @@ map_phase(Entries, OVar) ->
 
 % @pre -
 % @post -
-shuffle_phase(Pairs, GetOVar) ->
-    shuffle_phase(Pairs, #{}, GetOVar).
-shuffle_phase([], Dispatching, _) -> Dispatching;
-shuffle_phase([#{id := _, key := Key, value := _} = Pair|Pairs], Dispatching, GetOVar) ->
-    OVar = GetOVar(Key),
-    lasp:update(OVar, {add, Pair}, self()),
-    case maps:is_key(Key, Dispatching) of
-        true ->
-            shuffle_phase(Pairs, maps:update_with(Key, fun(Info) ->
-                maps:update_with(n, fun(N) -> N + 1 end, Info)
-            end, Dispatching), GetOVar);
-        false ->
-            shuffle_phase(Pairs, maps:put(Key, #{
-                n => 1,
-                variable => OVar
-            }, Dispatching), GetOVar)
-    end;
-shuffle_phase([_|Pairs], Dispatching, GetOVar) ->
-    shuffle_phase(Pairs, Dispatching, GetOVar).
+shuffle_phase(Pairs, Generator, Round) ->
+    lists:foldl(fun(Pair, Dispatching) ->
+        #{id := _, key := Key, value := _} = Pair,
+        OVar = gen_var(Generator, batch, [Round, Key]),
+        lasp:update(OVar, {add, Pair}, self()),
+        case maps:is_key(Key, Dispatching) of
+            true ->
+                maps:update_with(Key, fun(Info) ->
+                    maps:update_with(n, fun(N) ->
+                        N + 1
+                    end, Info)
+                end, Dispatching);
+            false ->
+                maps:put(Key, #{
+                    n => 1,
+                    variable => OVar
+                }, Dispatching)
+        end
+    end, #{}, Pairs).
 
 % ---------------------------------------------
 % Reduce phase :
@@ -103,15 +109,15 @@ convert_key(Key) when erlang:is_integer(Key) ->
 % @pre -
 % @post -
 reduce_phase(_, [], _, _) -> {0, false};
-reduce_phase(Group, Pairs, Reduce, OVar) ->
+reduce_phase(Batch, Pairs, Reduce, OVar) ->
     Values = [Value || #{value := Value} <- Pairs],
-    P1 = erlang:apply(Reduce, [Group, Values, false]),
-    P2 = filter_pairs(P1),
+    P1 = erlang:apply(Reduce, [Batch, Values, false]),
+    P2 = remove_invalid_pairs(P1),
     P3 = sort_pairs(P2),
     N = lists:foldl(fun(Pair, K) ->
         {Key, Value} = Pair,
         lasp:update(OVar, {add, #{
-            id => {Group, K},
+            id => {Batch, K},
             key => Key,
             value => Value
         }}, self()),
@@ -126,11 +132,13 @@ reduce_phase(Group, Pairs, Reduce, OVar) ->
 
 % @pre -
 % @post -
-get_total_cardinality(Info) ->
-    get_total_cardinality(Info, 0).
-get_total_cardinality([], Total) -> Total;
-get_total_cardinality([{_, Number, _}|T], Total) ->
-    get_total_cardinality(T, Number + Total).
+get_number_of_produced_pairs(Status) ->
+    lists:foldl(fun(Entry, Total) ->
+        case Entry of
+            {_, N, _} -> Total + N;
+            _ -> Total
+        end
+    end, 0, Status).
 
 % @pre -
 % @post -
@@ -151,10 +159,9 @@ choose_node() ->
 
 % @pre -
 % @post -
-give_task(Key, N, Vars, Reduce) ->
-    {IVar, CVar, OVar} = Vars,
+give_task(Batch, N, {IVar, SVar, OVar}, Reduce) ->
     Node = choose_node(),
-    Name = erlang:unique_integer(), % TODO: How to get a unique id for the task ?
+    Name = gen_task_name(),
     Task = achlys:declare(Name, Node, single, fun() ->
         io:format("Starting the reduction~n"),
         case await(read(IVar, N)) of
@@ -162,9 +169,9 @@ give_task(Key, N, Vars, Reduce) ->
                 io:format("Error: Could not get the input variable~n"),
                 [];
             {ok, Pairs} ->
-                {Cardinality, Flag} = reduce_phase(Key, Pairs, Reduce, OVar),
-                lasp:update(CVar, {add,
-                    {Key, Cardinality, Flag}
+                {Cardinality, Flag} = reduce_phase(Batch, Pairs, Reduce, OVar),
+                lasp:update(SVar, {add,
+                    {Batch, Cardinality, Flag}
                 }, self())
         end
     end),
@@ -172,13 +179,13 @@ give_task(Key, N, Vars, Reduce) ->
 
 % @pre -
 % @post -
-dispatch_tasks(Keys, Dispatching, Vars, Reduce) ->
-    {CVar, OVar} = Vars,
-    lists:foreach(fun(Key) ->
-        case maps:get(Key, Dispatching) of #{n := N, variable := IVar} ->
-            give_task(Key, N, {IVar, CVar, OVar}, Reduce)
+dispatch_tasks(Batches, Dispatching, Vars, Reduce) ->
+    {SVar, OVar} = Vars,
+    lists:foreach(fun(Batch) ->
+        case maps:get(Batch, Dispatching) of #{n := N, variable := IVar} ->
+            give_task(Batch, N, {IVar, SVar, OVar}, Reduce)
         end
-    end, Keys).
+    end, Batches).
 
 % @pre -
 % @post -
@@ -215,84 +222,71 @@ read(ID, N) ->
 
 % @pre -
 % @post -
-get_groups_with_missing_status(CVar, Keys) ->
-    Status = achlys_util:query(CVar),
-    lists:subtract(Keys, [Key || {Key, _, _} <- Status]).
+get_unresponsive_batches(SVar, Batches) ->
+    Status = achlys_util:query(SVar),
+    lists:subtract(Batches, [Batch || {Batch, _, _} <- Status]).
 
 % @pre -
 % @post -
-get_cardinality_per_key(Pairs) ->
-    get_cardinality_per_key(Pairs, #{}).
-get_cardinality_per_key([], Acc) -> Acc;
-get_cardinality_per_key([#{id := {Group, _}, key := _, value := _}|T], Acc) ->
-    case maps:is_key(Group, Acc) of
-        true ->
-            NextAcc = maps:update_with(Group, fun(N) -> N + 1 end, Acc),
-            get_cardinality_per_key(T, NextAcc);
-        false ->
-            NextAcc = maps:put(Group, 1, Acc),
-            get_cardinality_per_key(T, NextAcc)
-    end.
-
-% @pre -
-% @post -
-get_groups_with_missing_pairs(OVar, Status) ->
+get_incomplete_batches(OVar, Status) ->
     Pairs = achlys_util:query(OVar),
-    Cardinalities = get_cardinality_per_key(Pairs),
-    lists:foldl(fun({Key, Cardinality, _}, Keys) ->
-        case maps:get(Key, Cardinalities, 0) - Cardinality of
-            M when M < 0 -> [Key|Keys];
-            _ -> Keys
+    Cardinalities = lists:foldl(fun(Pair, Acc) ->
+        case Pair of
+            #{id := {Batch, _}, key := _, value := _} ->
+                case maps:is_key(Batch, Acc) of
+                    true ->
+                        maps:update_with(Batch, fun(N) ->
+                            N + 1
+                        end, Acc);
+                    false ->
+                        maps:put(Batch, 1, Acc)
+                end;
+            _ -> Acc
         end
-        % TODO: If M > 0, we have to much keys, what do we do ?
+    end, #{}, Pairs),
+    lists:foldl(fun({Batch, Cardinality, _}, Batches) ->
+        case Cardinality - maps:get(Batch, Cardinalities, 0) of
+            N when N > 0 -> [Batch|Batches];
+            _ -> Batches
+        end
     end, [], Status).
 
 % @pre -
 % @post -
-get_next_cvar_id(Round) ->
-    {erlang:list_to_binary(
-        erlang:integer_to_list(Round) ++ "-cvar"
-    ), state_gset}.
+round(Round, Pairs, Generator, Reduce, Options) ->
 
-% @pre -
-% @post -
-get_next_ovar_id(Round) ->
-    {erlang:list_to_binary(
-        erlang:integer_to_list(Round) ++ "-over"
-    ), state_gset}.
+    SVar = gen_var(Generator, svar, Round),
+    OVar = gen_var(Generator, ovar, Round),
+    Vars = {SVar, OVar},
 
-% @pre -
-% @post -
-round(Round, Pairs, Vars, Reduce, Options) ->
+    Dispatching = shuffle_phase(Pairs, Generator, Round),
+    Batches = maps:keys(Dispatching),
 
-    Dispatching = shuffle_phase(Pairs, fun(Key) ->
-        {erlang:list_to_binary(erlang:integer_to_list(Round) ++ convert_key(Key)), state_gset}
-    end),
-
-    Keys = maps:keys(Dispatching),
-    dispatch_tasks(Keys, Dispatching, Vars, Reduce),
+    dispatch_tasks(Batches, Dispatching, Vars, Reduce),
     
     % Debug :
     lists:foreach(fun(Status) ->
-        case Status of {_, #{variable := ID}} -> debug(ID) end
+        case Status of
+            {_, #{variable := ID}} ->
+                debug(ID)
+        end
     end, maps:to_list(Dispatching)),
-    
-    {CVar, OVar} = Vars,
+
     I = maps:size(Dispatching),
 
-    case await(read(CVar, I), fun() ->
-        Groups = get_groups_with_missing_status(CVar, Keys),
-        dispatch_tasks(Groups, Dispatching, Vars, Reduce)
-    end, 5) of
+    case await(read(SVar, I), fun() ->
+        FaultyBatches = get_unresponsive_batches(SVar, Batches),
+        dispatch_tasks(FaultyBatches, Dispatching, Vars, Reduce)
+    end, maps:get(max_attempts, Options)) of
         {error, _} ->
             io:format("Error: Could not get the status of each node~n"),
             [];
         {ok, Status} ->
-            J = get_total_cardinality(Status),
+            J = get_number_of_produced_pairs(Status),
             case await(read(OVar, J), fun() ->
-                Groups = get_groups_with_missing_pairs(OVar, Status),
-                dispatch_tasks(Groups, Dispatching, Vars, Reduce)
-            end, 5) of
+                FaultyBatches = get_incomplete_batches(OVar, Status),
+                dispatch_tasks(FaultyBatches, Dispatching, Vars, Reduce)
+            end, maps:get(max_attempts, Options)) of
                 {error, _} ->
                     io:format("Error: Could not get the output pairs~n"),
                     [];
@@ -302,12 +296,10 @@ round(Round, Pairs, Vars, Reduce, Options) ->
                             io:format("OVar = ~w Result = ~w~n", [OVar, Result]),
                             Result;
                         false ->
-                            NextCVar = get_next_cvar_id(Round),
-                            NextOVar = get_next_ovar_id(Round),
                             start_round(
                                 Round + 1,
                                 Result,
-                                {NextCVar, NextOVar},
+                                Generator,
                                 Reduce,
                                 Options
                             )
@@ -317,30 +309,91 @@ round(Round, Pairs, Vars, Reduce, Options) ->
 
 % @pre -
 % @post -
-start_round(Round, Pairs, Vars, Reduce, Options) ->
+start_round(Round, Pairs, Generator, Reduce, Options) ->
     case maps:get(max_round, Options) of
-        Max when Round > Max -> Pairs;
-        _ -> round(Round, Pairs, Vars, Reduce, Options)
+        Max when Round < Max ->
+            round(Round, Pairs, Generator, Reduce, Options);
+        _ ->
+            io:format("Warning: Too many rounds!~n"),
+            Pairs
+    end.
+
+% @pre -
+% @post -
+gen_var(Generator, Name, Args) ->
+    Fun = maps:get(Name, Generator),
+    case Args of
+        [_|_] -> erlang:apply(Fun, Args);
+        _ -> erlang:apply(Fun, [Args])
+    end.
+
+% @pre -
+% @post -
+gen_task_name() ->
+    case lasp_unique:unique() of
+        {ok, Name} -> Name
+    end.
+
+% @pre -
+% @post -
+get_default_name_generator() ->
+    case lasp_unique:unique() of
+        {ok, Seed} ->
+            Type = state_gset,
+            #{
+                ivar => fun(Round) ->
+                    Prefix = erlang:list_to_binary(
+                        "ivar-" ++ erlang:integer_to_list(Round) ++ "-"
+                    ),
+                    {<<Prefix/binary, Seed/binary>>, Type}
+                end,
+                svar => fun(Round) ->
+                    Prefix = erlang:list_to_binary(
+                        "svar-" ++ erlang:integer_to_list(Round) ++ "-"
+                    ),
+                    {<<Prefix/binary, Seed/binary>>, Type}
+                end,
+                ovar => fun(Round) ->
+                    Prefix = erlang:list_to_binary(
+                        "ovar-" ++ erlang:integer_to_list(Round) ++ "-"
+                    ),
+                    {<<Prefix/binary, Seed/binary>>, Type}
+                end,
+                batch => fun(Round, Key) ->
+                    Prefix = erlang:list_to_binary(
+                        "batch-" ++ erlang:integer_to_list(Round) ++ "-" ++ convert_key(Key) ++ "-"
+                    ),
+                    {<<Prefix/binary, Seed/binary>>, Type}
+                end
+            }
     end.
 
 % @pre -
 % @post -
 schedule(Entries, Reduce) ->
-    IVar = {<<"0-ivar">>, state_gset},
-    CVar = {<<"0-cvar">>, state_gset},
-    OVar = {<<"0-ovar">>, state_gset},
+    schedule(Entries, Reduce, #{
+        max_round => 10,
+        max_attempts => 5
+    }).
+
+% @pre -
+% @post -
+schedule(Entries, Reduce, Options) ->
+
+    Generator = get_default_name_generator(),
+    IVar = gen_var(Generator, ivar, 0),
     N = map_phase(Entries, IVar),
+
     case await(read(IVar, N), fun() ->
         map_phase(Entries, IVar)
-    end, 5) of
+    end, maps:get(max_attempts, Options)) of
         {error, _} ->
             io:format("Error: Could not map the input variables~n"),
             [];
         {ok, Pairs} ->
-            start_round(1, Pairs, {CVar, OVar}, Reduce, #{
-                max_round => 10
-            })
+            start_round(1, Pairs, Generator, Reduce, Options)
     end.
+
 
 % ---------------------------------------------
 % Debugging:
