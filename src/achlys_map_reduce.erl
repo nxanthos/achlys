@@ -104,7 +104,9 @@ shuffle_phase(Pairs, Generator, Round) ->
 convert_key(Key) when erlang:is_atom(Key) ->
     erlang:atom_to_list(Key);
 convert_key(Key) when erlang:is_integer(Key) ->
-    erlang:integer_to_list(Key).
+    erlang:integer_to_list(Key);
+convert_key(Key) when erlang:is_list(Key) ->
+    Key.
 
 % @pre -
 % @post -
@@ -163,7 +165,7 @@ give_task(Batch, N, {IVar, SVar, OVar}, Reduce) ->
     Node = choose_node(),
     Name = gen_task_name(),
     Task = achlys:declare(Name, Node, single, fun() ->
-        io:format("Starting the reduction~n"),
+        % io:format("Starting the reduction~n"),
         case await(read(IVar, N)) of
             {error, timeout} ->
                 io:format("Error: Could not get the input variable~n"),
@@ -265,16 +267,17 @@ round(Round, Pairs, Generator, Reduce, Options) ->
     dispatch_tasks(Batches, Dispatching, Vars, Reduce),
     
     % Debug :
-    lists:foreach(fun(Status) ->
-        case Status of
-            {_, #{variable := ID}} ->
-                debug(ID)
-        end
-    end, maps:to_list(Dispatching)),
+    % lists:foreach(fun(Status) ->
+    %     case Status of
+    %         {_, #{variable := ID}} ->
+    %             debug(ID)
+    %     end
+    % end, maps:to_list(Dispatching)),
 
     I = maps:size(Dispatching),
 
     case await(read(SVar, I), fun() ->
+        io:format("Resending task to unresponsive batches~n"),
         FaultyBatches = get_unresponsive_batches(SVar, Batches),
         dispatch_tasks(FaultyBatches, Dispatching, Vars, Reduce)
     end, maps:get(max_attempts, Options)) of
@@ -284,6 +287,7 @@ round(Round, Pairs, Generator, Reduce, Options) ->
         {ok, Status} ->
             J = get_number_of_produced_pairs(Status),
             case await(read(OVar, J), fun() ->
+                io:format("Resending task to incomplete batches~n"),
                 FaultyBatches = get_incomplete_batches(OVar, Status),
                 dispatch_tasks(FaultyBatches, Dispatching, Vars, Reduce)
             end, maps:get(max_attempts, Options)) of
@@ -293,7 +297,7 @@ round(Round, Pairs, Generator, Reduce, Options) ->
                 {ok, Result} ->
                     case is_irreductible(Status) of
                         true ->
-                            io:format("OVar = ~w Result = ~w~n", [OVar, Result]),
+                            % io:format("OVar = ~w Result = ~w~n", [OVar, Result]),
                             Result;
                         false ->
                             start_round(
@@ -312,6 +316,7 @@ round(Round, Pairs, Generator, Reduce, Options) ->
 start_round(Round, Pairs, Generator, Reduce, Options) ->
     case maps:get(max_round, Options) of
         Max when Round < Max ->
+            io:format("Starting round n°~p~n", [Round]),
             round(Round, Pairs, Generator, Reduce, Options);
         _ ->
             io:format("Warning: Too many rounds!~n"),
