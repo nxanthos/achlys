@@ -21,38 +21,34 @@ init(Parent, Args) ->
     process_flag(trap_exit, true),
     proc_lib:init_ack(Parent, {ok, self()}),
     case Args of
-        [Entries, State] ->
-            Cache = init_cache(Entries),
-            loop(Cache, State, #{});
-        [Entries, State, Callback] ->
-            Cache = init_cache(Entries),
-            loop(Cache, State, #{
-                callback => Callback
-            })
+        [Entries, State, Options] ->
+            Store = init_store(Entries),
+            loop(Store, State, Options)
     end.
 
 % @pre -
 % @post -
-start(Entries, State, Options) ->
-    achlys_stream_reducer_sup:start_child([Entries, State, Options]).
+start(Entries, State, Callback) ->
+    achlys_stream_reducer_sup:start_child([Entries, State, #{
+        callback => Callback
+    }]).
 
 % @pre -
 % @post -
-init_cache(Entries) ->
-    lists:foldl(fun(Entry, Cache) ->
+init_store(Entries) ->
+    lists:foldl(fun(Entry, Store) ->
         {ID, Fun} = Entry,
-        case orddict:is_key(ID, Cache) of
+        case orddict:is_key(ID, Store) of
             true ->
-                orddict:update(ID, fun(Map) ->
-                    maps:update_with(functions, fun(Funs) ->
-                        [Fun|Funs]
-                    end, Map)
-                end, Cache);
+                orddict:update(ID, fun(Orddict) ->
+                    orddict:append(functions, Fun, Orddict)
+                end, Store);
             false ->
-                orddict:store(ID, #{
-                    var_state => undefined,
-                    functions => [Fun]
-                }, Cache)
+                Orddict = orddict:from_list([
+                    {cache, undefined},
+                    {functions, []}
+                ]),
+                orddict:store(ID, orddict:append(functions, Fun, Orddict), Store)
         end
     end, orddict:new(), Entries).
 
@@ -65,10 +61,10 @@ terminate(Pids) ->
 
 % @pre -
 % @post -
-loop(Cache, State, Options) ->
-
-    Self = self(),
-    Pids = lists:map(fun({ID, #{var_state := OldVarState}}) ->
+spawn_read_funs(Self, Store) ->
+    L = orddict:to_list(Store),
+    lists:map(fun({ID, Orddict}) ->
+        OldVarState = orddict:fetch(cache, Orddict),
         erlang:spawn(fun() ->
             case lasp:read(ID, {strict, OldVarState}) of
                 {ok, {_, _, _, NewVarState}} ->
@@ -78,63 +74,64 @@ loop(Cache, State, Options) ->
                     error
             end
         end)
-    end, orddict:to_list(Cache)),
-
-    receive
-        {ok, ID, NewVarState} ->
-            terminate(Pids),
-            case orddict:find(ID, Cache) of {ok, #{
-                    var_state := OldVarState,
-                    functions := Funs
-                }} ->
-
-                    {_, Type} = ID,
-                    
-                    UpdatedCache = orddict:update(ID, fun(Map) ->
-                        maps:merge(Map, #{
-                            var_state => NewVarState
-                        })
-                    end, Cache),
-
-                    UpdatedState = lists:foldl(fun(Fun, NextState) ->
-                        Operations = get_delta_operations(
-                            Type,
-                            OldVarState,
-                            NewVarState
-                        ),
-                        lists:foldl(fun(Operation, Acc) ->
-                            erlang:apply(Fun, [Acc, Operation])
-                        end, NextState, Operations)
-                    end, State, Funs),
-
-                    case maps:find(callback, Options) of
-                        {ok, Callback} ->
-                            erlang:apply(Callback, [UpdatedState]);
-                        _ -> ok
-                    end,
-
-                    loop(UpdatedCache, UpdatedState, Options);
-
-                error ->
-                    io:format("The variable does not exist")
-            end;
-        _ ->
-            io:format("Other message~n~n")
-    end.
+    end, L).
 
 % @pre -
 % @post -
-get_delta_operations(Type, undefined, NewVarState) ->
-    get_delta_operations(Type, lasp_type:new(Type), NewVarState);
-get_delta_operations(Type, OldVarState, NewVarState) ->
-    Types = [
-        {state_gcounter, state_gcounter_ext},
-        {state_pncounter, state_pncounter_ext},
-        {state_gset, state_gset_ext},
-        {state_orset, state_orset_ext},
-        {state_twopset, state_twopset_ext}
-    ],
-    Predicate = fun({Current, _}) -> Current == Type end,
-    case lists:search(Predicate, Types) of {value, {_, Module}} ->
-        Module:delta_operations(OldVarState, NewVarState);
-    _ -> [] end.
+update_state(ID, Operations, {Store, State}) ->
+    Orddict = orddict:fetch(ID, Store),
+    Funs = orddict:fetch(functions, Orddict),
+    lists:foldl(fun(Fun, Acc1) ->
+        lists:foldl(fun(Operation, Acc2) ->
+            erlang:apply(Fun, [Acc2, Operation])
+        end, Acc1, Operations)
+    end, State, Funs).
+
+% @pre -
+% @post -
+update_store(ID, Orddict1, Store) ->
+    orddict:update(ID, fun(Orddict2) ->
+        orddict:merge(fun(_, V1, _) ->
+            V1
+        end, Orddict1, Orddict2)
+    end, Store).
+
+% @pre -
+% @post -
+loop(Store, State, Options) ->
+
+    Self = self(),
+    Pids = spawn_read_funs(Self, Store),
+
+    receive
+        {ok, ID, NewVarState} ->
+
+            terminate(Pids),
+            Orddict = orddict:fetch(ID, Store),
+
+            {_, Type} = ID,
+            OldVarState = orddict:fetch(cache, Orddict),
+            Operations = achlys_util:get_delta_operations(
+                Type,
+                OldVarState,
+                NewVarState
+            ),
+
+            UpdatedState = update_state(ID, Operations, {Store, State}),
+            UpdatedStore = update_store(ID, orddict:from_list([
+                {cache, NewVarState}
+            ]), Store),
+
+            % Callback:
+
+            case maps:find(callback, Options) of
+                {ok, Callback} ->
+                    erlang:apply(Callback, [UpdatedState]);
+                _ -> ok
+            end,
+
+            loop(UpdatedStore, UpdatedState, Options);
+        _ ->
+            terminate(Pids),
+            loop(Store, State, Options)
+    end.

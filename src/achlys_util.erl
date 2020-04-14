@@ -122,6 +122,25 @@ repeat(K, N, CallBack) when N > 0 ->
     repeat(K + 1, N - 1, CallBack);
 repeat(_, N, _) when N =< 0 -> ok.
 
+get_delta_operations(Type, undefined, NewVarState) ->
+    get_delta_operations(Type, lasp_type:new(Type), NewVarState);
+get_delta_operations(Type, OldVarState, undefined) ->
+    get_delta_operations(Type, OldVarState, lasp_type:new(Type));
+get_delta_operations(Type, undefined, undefined) ->
+    get_delta_operations(Type, lasp_type:new(Type), lasp_type:new(Type));
+get_delta_operations(Type, OldVarState, NewVarState) ->
+    Types = [
+        {state_gcounter, state_gcounter_ext},
+        {state_pncounter, state_pncounter_ext},
+        {state_gset, state_gset_ext},
+        {state_orset, state_orset_ext},
+        {state_twopset, state_twopset_ext}
+    ],
+    Predicate = fun({Current, _}) -> Current == Type end,
+    case lists:search(Predicate, Types) of {value, {_, Module}} ->
+        Module:delta_operations(OldVarState, NewVarState);
+    _ -> [] end.
+
 read_temp() ->
     pmod_nav:read(acc , [out_temp]).
 

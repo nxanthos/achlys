@@ -11,11 +11,8 @@ example_1() ->
     IVar1 = {<<"a">>, state_gset},
     IVar2 = {<<"b">>, state_gset},
 
-    lasp:update(IVar1, {add, 5}, self()),
-    lasp:update(IVar1, {add, 3}, self()),
-    lasp:update(IVar2, {add, 2}, self()),
-    lasp:update(IVar2, {add, 6}, self()),
-
+    lasp:bind(IVar1, {state_gset, [5, 3]}),
+    lasp:bind(IVar2, {state_gset, [2, 6]}),
     lasp:read(IVar1, {cardinality, 2}),
     lasp:read(IVar2, {cardinality, 2}),
 
@@ -35,7 +32,8 @@ example_1() ->
 
     lists:foreach(fun(Pair) ->
         io:format("Pair -> ~w~n", [Pair])
-    end, Pairs).
+    end, Pairs),
+    ok.
 
 % @pre -
 % @post -
@@ -75,38 +73,36 @@ read_csv(Path, Separator, Parser) ->
 
 % @pre -
 % @post -
-example_2() ->
+give_ids(Tuples) ->
+    lists:foldl(fun(Tuple, {I, List}) ->
+        {I + 1, [maps:put(id, I, Tuple)|List]}
+    end, {0, []}, Tuples).
 
+add_data(IVar) ->
+    Path = "dataset/data.csv",
+    Separator = ";",
     Parser = fun(Label, Column) ->
         case Label of temperature ->
             erlang:list_to_integer(Column);
         _ -> Column end
     end,
+    {N, Tuples} = give_ids(read_csv(Path, Separator, Parser)),
+    lasp:bind(IVar, {state_gset, Tuples}),
+    lasp:read(IVar, {cardinality, N}).
 
-    Tuples = read_csv("dataset/data.csv", ";", Parser),
+% @pre -
+% @post -
+example_2() ->
+
     IVar = {<<"table">>, state_gset},
-
-    lists:foldl(fun(Tuple, K) ->
-        lasp:update(IVar, {add,
-            maps:put(id, K, Tuple)
-        }, self()),
-        K + 1
-    end, 1, Tuples),
-
-    N = erlang:length(Tuples),
-    lasp:read(IVar, {cardinality, N}),
-
-    % Debug:
-    % {ok, Set} = lasp:query(IVar),
-    % io:format("Tuples=~p~n", [sets:to_list(Set)]),
+    add_data(IVar),
 
     Pairs = achlys_map_reduce:schedule([
         {IVar, fun(Value) -> % Map
             case Value of #{
                 country := Country,
                 temperature := Temperature
-            } ->
-                [{Country, Temperature}];
+            } -> [{Country, Temperature}];
             _ -> [] end
         end}
     ], fun(Key, Values, _) -> % Reduce

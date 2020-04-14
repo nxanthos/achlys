@@ -1,15 +1,16 @@
 -module(achlys_map_reduce).
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 -define(SERVER, ?MODULE).
+-define(TYPE, state_gset).
 -define(TIMEOUT, 1000).
 
 -export([
-    schedule/2,
-    debug/1
+    schedule/2
 ]).
-
-% ---------------------------------------------
-% Map phase :
-% ---------------------------------------------
 
 % @pre -
 % @post -
@@ -23,29 +24,6 @@ get_values(ID) ->
 
 % @pre -
 % @post -
-remove_invalid_pairs(Pairs) ->
-    lists:filter(fun(Pair) -> 
-        case Pair of
-            {_, _} -> true;
-            _ -> false
-        end
-    end, Pairs).
-
-% @pre -
-% @post -
-get_pairs({IVar, Map}) ->
-    Values = get_values(IVar),
-    lists:foldl(fun(Value, Pairs) ->
-        case erlang:apply(Map, [Value]) of
-            Result when erlang:is_list(Result) ->
-                Pairs ++ remove_invalid_pairs(Result);
-            {_, _} = Pair ->
-                Pairs ++ [Pair]
-        end
-    end, [], Values).
-
-% @pre -
-% @post -
 sort_pairs(Pairs) when erlang:is_list(Pairs) ->
     lists:sort(Pairs);
 sort_pairs(Pair) when erlang:is_tuple(Pair) ->
@@ -53,51 +31,27 @@ sort_pairs(Pair) when erlang:is_tuple(Pair) ->
 
 % @pre -
 % @post -
-map_phase([], _) -> 0;
-map_phase(Entries, OVar) ->
-    P1 = lists:foldl(fun(Entry, Pairs) ->
-        Pairs ++ get_pairs(Entry)
-    end, [], Entries),
-    P2 = sort_pairs(P1),
-    lists:foldl(fun(Pair, K) ->
-        {Key, Value} = Pair,
-        lasp:update(OVar, {add, #{
+give_ids(Pairs) ->
+    lists:foldl(fun({Key, Value}, {K, Tuples}) ->
+        Tuple = #{
             id => K,
             key => Key,
             value => Value
-        }}, self()),
-        K + 1
-    end, 0, P2).
-
-% ---------------------------------------------
-% Shuffle phase :
-% ---------------------------------------------
+        },
+        {K + 1, [Tuple|Tuples]}
+    end, {0, []}, Pairs).
 
 % @pre -
 % @post -
-shuffle_phase(Pairs, Generator, Round) ->
-    lists:foldl(fun(Pair, Dispatching) ->
-        #{id := _, key := Key, value := _} = Pair,
-        OVar = gen_var(Generator, batch, [Round, Key]),
-        lasp:update(OVar, {add, Pair}, self()),
-        case maps:is_key(Key, Dispatching) of
-            true ->
-                maps:update_with(Key, fun(Info) ->
-                    maps:update_with(n, fun(N) ->
-                        N + 1
-                    end, Info)
-                end, Dispatching);
-            false ->
-                maps:put(Key, #{
-                    n => 1,
-                    variable => OVar
-                }, Dispatching)
-        end
-    end, #{}, Pairs).
-
-% ---------------------------------------------
-% Reduce phase :
-% ---------------------------------------------
+give_ids(Batch, Pairs) ->
+    lists:foldl(fun({Key, Value}, {K, Tuples}) ->
+        Tuple = #{
+            id => {Batch, K},
+            key => Key,
+            value => Value
+        },
+        {K + 1, [Tuple|Tuples]}
+    end, {0, []}, Pairs).
 
 % @pre -
 % @post -
@@ -110,23 +64,154 @@ convert_key(Key) when erlang:is_list(Key) ->
 
 % @pre -
 % @post -
+choose_node() ->
+    {ok, Members} = partisan_peer_service:members(),
+    Length = erlang:length(Members),
+    Index = rand:uniform(Length),
+    [lists:nth(Index, Members)].
+
+% @pre -
+% @post -
+gen_var(Generator, Name, Args) ->
+    Fun = maps:get(Name, Generator),
+    case Args of
+        [_|_] -> erlang:apply(Fun, Args);
+        _ -> erlang:apply(Fun, [Args])
+    end.
+
+% @pre -
+% @post -
+gen_task_name() ->
+    case lasp_unique:unique() of
+        {ok, Name} -> Name
+    end.
+
+% @pre -
+% @post -
+get_default_name_generator() ->
+    case lasp_unique:unique() of
+        {ok, Seed} ->
+            #{
+                ivar => fun(Round) ->
+                    Prefix = erlang:list_to_binary(
+                        "ivar-" ++ erlang:integer_to_list(Round) ++ "-"
+                    ),
+                    {<<Prefix/binary, Seed/binary>>, ?TYPE}
+                end,
+                svar => fun(Round) ->
+                    Prefix = erlang:list_to_binary(
+                        "svar-" ++ erlang:integer_to_list(Round) ++ "-"
+                    ),
+                    {<<Prefix/binary, Seed/binary>>, ?TYPE}
+                end,
+                ovar => fun(Round) ->
+                    Prefix = erlang:list_to_binary(
+                        "ovar-" ++ erlang:integer_to_list(Round) ++ "-"
+                    ),
+                    {<<Prefix/binary, Seed/binary>>, ?TYPE}
+                end,
+                batch => fun(Round, Key) ->
+                    Prefix = erlang:list_to_binary(
+                        "batch-" ++ erlang:integer_to_list(Round) ++ "-" ++ convert_key(Key) ++ "-"
+                    ),
+                    {<<Prefix/binary, Seed/binary>>, ?TYPE}
+                end
+            }
+    end.
+
+% @pre -
+% @post -
+read(ID, N) ->
+    fun() ->
+        {ok, {_, _, _, {_, Values}}} = lasp:read(ID, {cardinality, N}),
+        Values
+    end.
+
+% ---------------------------------------------
+% Map phase :
+% ---------------------------------------------
+
+% @pre -
+% @post -
+map_pairs(Entries) ->
+    lists:foldl(fun({IVar, Map}, Acc1) ->
+        Values = get_values(IVar),
+        lists:foldl(fun(Value, Acc2) ->
+            Pairs = erlang:apply(Map, [Value]),
+            lists:foldl(fun(Pair, Acc3) ->
+                case Pair of {_, _} -> [Pair|Acc3];
+                _ -> Acc3 end
+            end, Acc2, Pairs)
+        end, Acc1, Values)
+    end, [], Entries).
+
+% @pre -
+% @post -
+map_phase([], _) -> 0;
+map_phase(Entries, OVar) ->
+    P1 = map_pairs(Entries),
+    P2 = sort_pairs(P1),
+    {N, P3} = give_ids(P2),
+    lasp:bind(OVar, {?TYPE, P3}),
+    N.
+
+% ---------------------------------------------
+% Shuffle phase :
+% ---------------------------------------------
+
+% @pre -
+% @post -
+get_partitions(Pairs) ->
+    Partitions = lists:foldl(fun(Pair, Acc) ->
+        case Pair of #{key := Key} ->
+            orddict:append(Key, Pair, Acc)
+        end
+    end, orddict:new(), Pairs),
+    orddict:to_list(Partitions).
+
+% @pre -
+% @post -
+shuffle_phase(Pairs, Generator, Round) ->
+    Partitions = get_partitions(Pairs),
+    lists:foldl(fun({Key, Partition}, Dispatching) ->
+        OVar = gen_var(Generator, batch, [Round, Key]),
+        lasp:bind(OVar, {?TYPE, Partition}),
+        maps:put(Key, #{
+            n => erlang:length(Partition),
+            variable => OVar
+        }, Dispatching)
+    end, maps:new(), Partitions).
+
+% ---------------------------------------------
+% Reduce phase :
+% ---------------------------------------------
+
+% @pre -
+% @post -
+reduce_pairs(Batch, Pairs, Reduce) ->
+    Values = [Value || #{value := Value} <- Pairs],
+    L = erlang:apply(Reduce, [Batch, Values, false]),
+    lists:foldl(fun(Pair, Acc) ->
+        case Pair of {_, _} ->
+            [Pair|Acc];
+        _ -> Acc end
+    end, [], L).
+
+% @pre -
+% @post -
+has_changed(P1, P2) ->
+    P3 = sort_pairs([{Key, Value} || #{key := Key, value := Value} <- P1]),
+    not (P2 =:= P3). % not exactly equal
+
+% @pre -
+% @post -
 reduce_phase(_, [], _, _) -> {0, false};
 reduce_phase(Batch, Pairs, Reduce, OVar) ->
-    Values = [Value || #{value := Value} <- Pairs],
-    P1 = erlang:apply(Reduce, [Batch, Values, false]),
-    P2 = remove_invalid_pairs(P1),
-    P3 = sort_pairs(P2),
-    N = lists:foldl(fun(Pair, K) ->
-        {Key, Value} = Pair,
-        lasp:update(OVar, {add, #{
-            id => {Batch, K},
-            key => Key,
-            value => Value
-        }}, self()),
-        K + 1
-    end, 0, P3),
-    P4 = sort_pairs([{Key, Value} || #{key := Key, value := Value} <- Pairs]),
-    {N, not (P3 =:= P4)}.
+    P1 = reduce_pairs(Batch, Pairs, Reduce),
+    P2 = sort_pairs(P1),
+    {N, P3} = give_ids(Batch, P2),
+    lasp:bind(OVar, {?TYPE, P3}),
+    {N, has_changed(Pairs, P2)}.
 
 % ---------------------------------------------
 % Helpers:
@@ -144,20 +229,8 @@ get_number_of_produced_pairs(Status) ->
 
 % @pre -
 % @post -
-is_irreductible([]) -> true;
-is_irreductible([{_, _, Flag}|T]) ->
-    case Flag of
-        true -> false;
-        false -> is_irreductible(T)
-    end.
-
-% @pre -
-% @post -
-choose_node() ->
-    {ok, Members} = partisan_peer_service:members(),
-    Length = erlang:length(Members),
-    Index = rand:uniform(Length),
-    [lists:nth(Index, Members)].
+is_irreductible(L) ->
+    not lists:any(fun({_, _, Flag}) -> Flag end, L).
 
 % @pre -
 % @post -
@@ -165,8 +238,9 @@ give_task(Batch, N, {IVar, SVar, OVar}, Reduce) ->
     Node = choose_node(),
     Name = gen_task_name(),
     Task = achlys:declare(Name, Node, single, fun() ->
-        % io:format("Starting the reduction~n"),
-        case await(read(IVar, N)) of
+        case await(read(IVar, N), fun() ->
+            io:format("Retrying~n")
+        end, 5) of
             {error, timeout} ->
                 io:format("Error: Could not get the input variable~n"),
                 [];
@@ -216,14 +290,6 @@ await(Action, OnTimeout, K) ->
 
 % @pre -
 % @post -
-read(ID, N) ->
-    fun() ->
-        {ok, {_, _, _, {_, Values}}} = lasp:read(ID, {cardinality, N}),
-        Values
-    end.
-
-% @pre -
-% @post -
 get_unresponsive_batches(SVar, Batches) ->
     Status = achlys_util:query(SVar),
     lists:subtract(Batches, [Batch || {Batch, _, _} <- Status]).
@@ -257,12 +323,12 @@ get_incomplete_batches(OVar, Status) ->
 % @post -
 round(Round, Pairs, Generator, Reduce, Options) ->
 
+    Dispatching = shuffle_phase(Pairs, Generator, Round),
+    Batches = maps:keys(Dispatching),
+
     SVar = gen_var(Generator, svar, Round),
     OVar = gen_var(Generator, ovar, Round),
     Vars = {SVar, OVar},
-
-    Dispatching = shuffle_phase(Pairs, Generator, Round),
-    Batches = maps:keys(Dispatching),
 
     dispatch_tasks(Batches, Dispatching, Vars, Reduce),
     
@@ -277,7 +343,6 @@ round(Round, Pairs, Generator, Reduce, Options) ->
     I = maps:size(Dispatching),
 
     case await(read(SVar, I), fun() ->
-        io:format("Resending task to unresponsive batches~n"),
         FaultyBatches = get_unresponsive_batches(SVar, Batches),
         dispatch_tasks(FaultyBatches, Dispatching, Vars, Reduce)
     end, maps:get(max_attempts, Options)) of
@@ -287,7 +352,6 @@ round(Round, Pairs, Generator, Reduce, Options) ->
         {ok, Status} ->
             J = get_number_of_produced_pairs(Status),
             case await(read(OVar, J), fun() ->
-                io:format("Resending task to incomplete batches~n"),
                 FaultyBatches = get_incomplete_batches(OVar, Status),
                 dispatch_tasks(FaultyBatches, Dispatching, Vars, Reduce)
             end, maps:get(max_attempts, Options)) of
@@ -325,60 +389,10 @@ start_round(Round, Pairs, Generator, Reduce, Options) ->
 
 % @pre -
 % @post -
-gen_var(Generator, Name, Args) ->
-    Fun = maps:get(Name, Generator),
-    case Args of
-        [_|_] -> erlang:apply(Fun, Args);
-        _ -> erlang:apply(Fun, [Args])
-    end.
-
-% @pre -
-% @post -
-gen_task_name() ->
-    case lasp_unique:unique() of
-        {ok, Name} -> Name
-    end.
-
-% @pre -
-% @post -
-get_default_name_generator() ->
-    case lasp_unique:unique() of
-        {ok, Seed} ->
-            Type = state_gset,
-            #{
-                ivar => fun(Round) ->
-                    Prefix = erlang:list_to_binary(
-                        "ivar-" ++ erlang:integer_to_list(Round) ++ "-"
-                    ),
-                    {<<Prefix/binary, Seed/binary>>, Type}
-                end,
-                svar => fun(Round) ->
-                    Prefix = erlang:list_to_binary(
-                        "svar-" ++ erlang:integer_to_list(Round) ++ "-"
-                    ),
-                    {<<Prefix/binary, Seed/binary>>, Type}
-                end,
-                ovar => fun(Round) ->
-                    Prefix = erlang:list_to_binary(
-                        "ovar-" ++ erlang:integer_to_list(Round) ++ "-"
-                    ),
-                    {<<Prefix/binary, Seed/binary>>, Type}
-                end,
-                batch => fun(Round, Key) ->
-                    Prefix = erlang:list_to_binary(
-                        "batch-" ++ erlang:integer_to_list(Round) ++ "-" ++ convert_key(Key) ++ "-"
-                    ),
-                    {<<Prefix/binary, Seed/binary>>, Type}
-                end
-            }
-    end.
-
-% @pre -
-% @post -
 schedule(Entries, Reduce) ->
     schedule(Entries, Reduce, #{
         max_round => 10,
-        max_attempts => 5
+        max_attempts => 1
     }).
 
 % @pre -
@@ -399,14 +413,40 @@ schedule(Entries, Reduce, Options) ->
             start_round(1, Pairs, Generator, Reduce, Options)
     end.
 
+% ---------------------------------------------
+% EUnit tests:
+% ---------------------------------------------
 
-% ---------------------------------------------
-% Debugging:
-% ---------------------------------------------
+-ifdef(TEST).
 
 % @pre -
 % @post -
-debug(ID) ->
-    {ok, Set} = lasp:query(ID),
-    Values = sets:to_list(Set),
-    io:format("Variable (~w) -> ~w~n", [ID, Values]).
+give_ids_test() ->
+    {A, B} = give_ids([
+        {a, 1},
+        {b, 2},
+        {a, 3}
+    ]),
+    ?assertEqual(A, 3),
+    ?assertEqual(B, [
+        #{id => 2, key => a, value => 3},
+        #{id => 1, key => b, value => 2},
+        #{id => 0, key => a, value => 1}
+    ]),
+    {C, D} = give_ids([
+        {b, 2},
+        {a, 1},
+        {a, 3}
+    ]),
+    ?assertEqual(C, 3),
+    ?assertEqual(D, [
+        #{id => 2, key => a, value => 3},
+        #{id => 1, key => a, value => 1},
+        #{id => 0, key => b, value => 2}
+    ]),
+    ok.
+
+-endif.
+
+% To launch the tests:
+% rebar3 eunit --module=achlys_map_reduce
