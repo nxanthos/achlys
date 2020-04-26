@@ -27,9 +27,7 @@
             }
         }
     }},
-    {boards, [
-        % achlys@my_grisp_board_1
-    ]}
+    {boards, [${BOARDS}]}
 ]} ,
 
 {plumtree, [
