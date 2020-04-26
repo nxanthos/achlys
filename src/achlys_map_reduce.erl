@@ -6,7 +6,7 @@
 
 -define(SERVER, ?MODULE).
 -define(TYPE, state_gset).
--define(TIMEOUT, 1000).
+-define(TIMEOUT, 3000).
 
 -export([
     schedule/2
@@ -75,8 +75,10 @@ choose_node() ->
 gen_var(Generator, Name, Args) ->
     Fun = maps:get(Name, Generator),
     case Args of
-        [_|_] -> erlang:apply(Fun, Args);
-        _ -> erlang:apply(Fun, [Args])
+        L when erlang:is_list(L) ->
+            erlang:apply(Fun, Args);
+        E ->
+            erlang:apply(Fun, [E])
     end.
 
 % @pre -
@@ -284,7 +286,7 @@ await(Action, OnTimeout, K) ->
     case await(Action) of
         {error, timeout} ->
             OnTimeout(),
-            await(Action, OnTimeout, K);
+            await(Action, OnTimeout, K - 1);
         Response -> Response
     end.
 
@@ -392,7 +394,7 @@ start_round(Round, Pairs, Generator, Reduce, Options) ->
 schedule(Entries, Reduce) ->
     schedule(Entries, Reduce, #{
         max_round => 10,
-        max_attempts => 1
+        max_attempts => 3
     }).
 
 % @pre -
