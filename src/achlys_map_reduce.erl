@@ -6,7 +6,6 @@
 
 -define(SERVER, ?MODULE).
 -define(TYPE, state_gset).
--define(TIMEOUT, 3000).
 
 -export([
     schedule/2
@@ -240,13 +239,18 @@ give_task(Batch, N, {IVar, SVar, OVar}, Reduce) ->
     Node = choose_node(),
     Name = gen_task_name(),
     Task = achlys:declare(Name, Node, single, fun() ->
-        case await(read(IVar, N), fun() ->
-            io:format("Retrying~n")
-        end, 5) of
-            {error, timeout} ->
-                io:format("Error: Could not get the input variable~n"),
-                [];
-            {ok, Pairs} ->
+        io:format("Starting the reduction~n"),
+        Options = #{
+            max_attempts => 10,
+            timeout => 1000
+        },
+        case promise:all([
+            {read(IVar, N), []}
+        ], Options) of
+            max_attempts_reached ->
+                io:format("Error: Max attempts reached - Could not get the input variable~n");
+            {ok, Results} ->
+                Pairs = lists:flatmap(fun({_, Pair}) -> Pair end, orddict:to_list(Results)),
                 {Cardinality, Flag} = reduce_phase(Batch, Pairs, Reduce, OVar),
                 lasp:update(SVar, {add,
                     {Batch, Cardinality, Flag}
@@ -264,31 +268,6 @@ dispatch_tasks(Batches, Dispatching, Vars, Reduce) ->
             give_task(Batch, N, {IVar, SVar, OVar}, Reduce)
         end
     end, Batches).
-
-% @pre -
-% @post -
-await(Action) ->
-    Pid = self(),
-    erlang:spawn(fun() ->
-        Self = self(),
-        erlang:spawn(fun() ->
-            Self ! Action()
-        end),
-        receive Result ->
-            Pid ! {ok, Result}
-        after ?TIMEOUT ->
-            Pid ! {error, timeout}
-        end
-    end),
-    receive Result -> Result end.
-await(_, _, 0) -> {error, max_attempts_reached};
-await(Action, OnTimeout, K) -> 
-    case await(Action) of
-        {error, timeout} ->
-            OnTimeout(),
-            await(Action, OnTimeout, K - 1);
-        Response -> Response
-    end.
 
 % @pre -
 % @post -
@@ -333,42 +312,41 @@ round(Round, Pairs, Generator, Reduce, Options) ->
     Vars = {SVar, OVar},
 
     dispatch_tasks(Batches, Dispatching, Vars, Reduce),
-    
-    % Debug :
-    % lists:foreach(fun(Status) ->
-    %     case Status of
-    %         {_, #{variable := ID}} ->
-    %             debug(ID)
-    %     end
-    % end, maps:to_list(Dispatching)),
 
     I = maps:size(Dispatching),
 
-    case await(read(SVar, I), fun() ->
+    case promise:all([
+        {read(SVar, I), []}
+    ], fun(Tasks) ->
         FaultyBatches = get_unresponsive_batches(SVar, Batches),
-        dispatch_tasks(FaultyBatches, Dispatching, Vars, Reduce)
-    end, maps:get(max_attempts, Options)) of
-        {error, _} ->
-            io:format("Error: Could not get the status of each node~n"),
+        dispatch_tasks(FaultyBatches, Dispatching, Vars, Reduce),
+        Tasks
+    end, Options) of
+        max_attempts_reached ->
+            io:format("Error: Max attempts reached - Could not the status of each node~n"),
             [];
-        {ok, Status} ->
+        {ok, R1} ->
+            Status = lists:flatmap(fun({_, Pair}) -> Pair end, orddict:to_list(R1)),
             J = get_number_of_produced_pairs(Status),
-            case await(read(OVar, J), fun() ->
+            case promise:all([
+                {read(OVar, J), []}
+            ], fun(Tasks) ->
                 FaultyBatches = get_incomplete_batches(OVar, Status),
-                dispatch_tasks(FaultyBatches, Dispatching, Vars, Reduce)
-            end, maps:get(max_attempts, Options)) of
-                {error, _} ->
-                    io:format("Error: Could not get the output pairs~n"),
+                dispatch_tasks(FaultyBatches, Dispatching, Vars, Reduce),
+                Tasks
+            end, Options) of
+                max_attempts_reached ->
+                    io:format("Error: Max attempts reached - Could not get the output pairs~n"),
                     [];
-                {ok, Result} ->
+                {ok, R2} ->
+                    NewPairs = lists:flatmap(fun({_, Pair}) -> Pair end, orddict:to_list(R2)),
                     case is_irreductible(Status) of
                         true ->
-                            % io:format("OVar = ~w Result = ~w~n", [OVar, Result]),
-                            Result;
+                            NewPairs;
                         false ->
                             start_round(
                                 Round + 1,
-                                Result,
+                                NewPairs,
                                 Generator,
                                 Reduce,
                                 Options
@@ -394,7 +372,9 @@ start_round(Round, Pairs, Generator, Reduce, Options) ->
 schedule(Entries, Reduce) ->
     schedule(Entries, Reduce, #{
         max_round => 10,
-        max_attempts => 3
+        max_attempts => 3,
+        max_batch_cardinality => 50,
+        timeout => 1000
     }).
 
 % @pre -
@@ -405,13 +385,17 @@ schedule(Entries, Reduce, Options) ->
     IVar = gen_var(Generator, ivar, 0),
     N = map_phase(Entries, IVar),
 
-    case await(read(IVar, N), fun() ->
-        map_phase(Entries, IVar)
-    end, maps:get(max_attempts, Options)) of
-        {error, _} ->
-            io:format("Error: Could not map the input variables~n"),
+    case promise:all([
+        {read(IVar, N), []}
+    ], fun(Tasks) ->
+        map_phase(Entries, IVar),
+        Tasks
+    end, Options) of
+        max_attempts_reached ->
+            io:format("Error: Max attempts reached - Could not map the input variables~n"),
             [];
-        {ok, Pairs} ->
+        {ok, Results} ->
+            Pairs = lists:flatmap(fun({_, Pair}) -> Pair end, orddict:to_list(Results)),
             start_round(1, Pairs, Generator, Reduce, Options)
     end.
 
