@@ -10,6 +10,35 @@
     debug/2
 ]).
 
+-export([
+    test_bind_with_gset/0,
+    test_bind_with_gcounter/0
+]).
+
+% @pre -
+% @post -
+test_bind_with_gset() ->
+    Var = {<<"var">>, state_gset},
+    lasp:bind(Var, {state_gset, [1, 2, 3]}),
+    {ok, S1} = lasp:query(Var),
+    io:format("S1=~p~n", [sets:to_list(S1)]), % Print: [1, 2, 3]
+    lasp:bind(Var, {state_gset, [4, 5, 6]}),
+    {ok, S2} = lasp:query(Var),
+    io:format("S2=~p~n", [sets:to_list(S2)]), % Print: [1, 2, 3, 4, 5, 6]
+    ok.
+
+% @pre -
+% @post -
+test_bind_with_gcounter() ->
+    Var = {<<"var">>, state_gcounter},
+    lasp:bind(Var, {state_gcounter, []}),
+    {ok, S1} = lasp:query(Var),
+    io:format("S1=~p~n", [sets:to_list(S1)]), % Print: [1, 2, 3]
+    lasp:bind(Var, {state_gset, [4, 5, 6]}),
+    {ok, S2} = lasp:query(Var),
+    io:format("S2=~p~n", [sets:to_list(S2)]), % Print: [1, 2, 3, 4, 5, 6]
+    ok.
+
 % @pre -
 % @post -
 test_map() ->
