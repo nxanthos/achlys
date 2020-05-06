@@ -15,8 +15,95 @@
 -compile(export_all).
 
 %%====================================================================
+%% Task model functions
+%%====================================================================
+
+%% @doc Returns the task model variable based on the given arguments
+%% in the form of a map.
+-spec declare(Name::atom()
+    , Targets::[node()] | all
+    , ExecType::single | permanent
+    , Func::function()) -> task() | erlang:exception().
+declare(Name, Targets, ExecType, Func) ->
+    try lists:member(ExecType, [single, permanent]) of
+        true when Targets =:= all orelse is_list(Targets) ->
+            form_map(Name, Targets, ExecType, Func)
+    catch
+        Exception:Reason -> {caught, Exception, Reason}
+    end.
+
+form_map(Name, Targets, ExecType, Func) ->
+        #{name => Name
+        , targets => task_flag(Targets)
+        , execution_type => task_flag(ExecType)
+        , function => Func}.
+
+task_flag(all) ->
+    <<0>>;
+task_flag(permanent) ->
+    <<0>>;
+task_flag(single) ->
+    <<1>>;
+task_flag(Args) ->
+    Args.
+
+-spec rainbow() -> erlang:function().
+rainbow() ->
+    Func = fun() ->
+        Random = fun() ->
+            {rand:uniform(2) - 1, rand:uniform(2) -1, rand:uniform(2) - 1}
+        end,
+        _ = [grisp_led:pattern(L, [{100, Random}]) || L <- [1,2]]
+    end,
+    Func.
+
+ledtask() ->
+    Func = fun
+        () ->
+            logger:log(notice, "Executing ledtask "),
+            grisp_led:color(1, blue),
+            grisp_led:color(1, red),
+            grisp_led:color(1, blue)
+    end.
+
+get_pmod_nav_temp_task() ->
+    F = fun
+        () ->
+            logger:log(notice, "Executing pmod_nav_temp_task "),
+            achlys:venom()
+            % achlys:venom(),
+            % {TempId, _} = achlys_util:get_variable_identifier(temperature),
+            % InvariantFun = fun
+            %     % (TempId) ->
+            %     () ->
+            %         logger:log(notice, "Enforcing func for Id : ~p", [TempId]),
+            %         % lasp:read(Id, {cardinality, 3}),
+            %         ok = achlys_pmod_als_worker:terminate(normal, #{})
+            %         % L = achlys_util:query(Id),
+            %         % io:format("Temperatures : ~p", [L])
+            % end,
+            % % spawn(F(TempId))
+            % lasp:invariant(TempId, {cardinality, 3}, InvariantFun)
+    end,
+    #{name => pmod_nav_temp_task
+    , targets => ?TARGET_ALL_NODES
+    , execution_type => ?SINGLE_EXECUTION_TASK
+    , function => F}.
+
+%%====================================================================
 %% Utility functions
 %%====================================================================
+
+myself() ->
+    case (lasp_peer_service:manager()):myself() of
+        #{ name := Name } -> Name
+    end.
+
+get_neighbors() ->
+    case achlys:members() of {ok, L} ->
+        Name = achlys_util:myself(),
+        lists:filter(fun(X) -> not (X == Name) end, L)
+    end.
 
 query(Name , Type) when is_atom(Name), is_atom(Type) ->
     {ok , S} = lasp:query({atom_to_binary(Name , utf8) , Type}) ,
@@ -31,123 +118,39 @@ declare_crdt(Name , Type) ->
     {ok , {Id , _ , _ , _}} = lasp:declare({Bitstring , Type} , Type) ,
     Id.
 
-lager_level() ->
-    % default to notice
-    lager:set_loglevel(lager_console_backend, notice).
-
-lager_level(ConsoleLevel) ->
-    lager:set_loglevel(lager_console_backend, ConsoleLevel).
-
-logger_level(LoggerPrimaryLevel) ->
-    % OTP Kernel logger module log level
-    logger:set_primary_config(level,LoggerPrimaryLevel).
-
-%%====================================================================
-%% Harware/IO helpers
-%%====================================================================
-
-gpio_pins() ->
-    [% slot 1
-    gpio1_1 
-    , gpio1_2 
-    , gpio1_3 
-    , gpio1_4
-    % slot 2
-    , gpio2_1 
-    , gpio2_2 
-    , gpio2_3 
-    , gpio2_4].
-
-gpio_clear() ->
-    [ grisp_gpio:clear(X) || X <- gpio_pins() ].
-
-gpio_set_all() ->
-    [ grisp_gpio:set(X) || X <- gpio_pins() ].
-
-pmod_led_set(Count) ->
-    Leds = lists:usort(gpio_pins()),
-    [ grisp_gpio:set(X) || X <- lists:sublist(Leds, Count) ].
-
-%%====================================================================
-%% Benchmark helpers
-%%====================================================================
-
-gset(Name) -> 
-    ?MODULE:declare_crdt(Name, state_gset).
-
-orset(Name) -> 
-    ?MODULE:declare_crdt(Name, state_orset).
-
-add_to_orset(Value) ->
-    lasp:update({<<"orset">>,state_orset}, {add, Value}, self()).
-
-rmv_from_orset(Value) ->
-    lasp:update({<<"orset">>,state_orset}, {rmv, Value}, self()).
-
-get_orset() ->
-    {ok, Set} = lasp:query({<<"orset">>,state_orset}) , 
-    sets:to_list(Set).
-
-populate_orset() ->
-    fun() ->
-        {ok, Backpressure} = achlys_config:get(backpressure_interval),
-        ?MODULE:add_to_orset(orset_test_atom),
-        erlang:send_after(Backpressure , self() , {added}),
-        receive
-            {added} ->
-                logger:log(notice, "added ~n"),
-                ?MODULE:rmv_from_orset(),
-                erlang:send_after(Backpressure , self() , {removed});
-            {removed} ->
-                logger:log(notice, "removed ~n"),
-                ?MODULE:add_to_orset(),
-                erlang:send_after(Backpressure , self() , {added})
-        after 10000 ->
-            logger:critical("benchmark update timeout ~n"),
-            logger:log(notice, "benchmark update timeout ~n")
-        end
-    end.
-
-recon_info() ->
-    CacheHitRates = recon_alloc:cache_hit_rates(),
-    Frag = recon_alloc:fragmentation(current),
-    Alloc = recon_alloc:memory(allocated),
-    Used = recon_alloc:memory(used),
-    Unused = recon_alloc:memory(unused),
-    SingleToMultiBlockRatio = recon_alloc:sbcs_to_mbcs(current),
-    [CacheHitRates
-        ,Frag
-        ,Alloc
-        ,Used
-        ,Unused
-        ,SingleToMultiBlockRatio].
-
-recon_info([CacheHitRates
-        ,Frag
-        ,Alloc
-        ,Used
-        ,Unused
-        ,SingleToMultiBlockRatio]) ->
-    logger:log(notice, "recon_alloc statistics : ~n 
-        cache_hit_rates = ~p ~n
-        Frag =  ~p ~n
-        Alloc =  ~p ~n
-        Used =  ~p ~n
-        Unused =  ~p ~n
-        SingleToMultiBlockRatio = ~p ~n"
-        , [CacheHitRates
-            ,Frag
-            ,Alloc
-            ,Used
-            ,Unused
-            ,SingleToMultiBlockRatio]).
-
-
 do_gc() ->
-    achlys:gc().
+    _ = [erlang:garbage_collect(X , [{type , 'major'}]) 
+        || X <- erlang:processes()] ,
+    ok.
 
 gc_info() ->
     statistics(garbage_collection).
+
+repeat(N, CallBack) ->
+    repeat(0, N, CallBack).
+repeat(K, N, CallBack) when N > 0 ->
+    CallBack(K),
+    repeat(K + 1, N - 1, CallBack);
+repeat(_, N, _) when N =< 0 -> ok.
+
+get_delta_operations(Type, undefined, NewVarState) ->
+    get_delta_operations(Type, lasp_type:new(Type), NewVarState);
+get_delta_operations(Type, OldVarState, undefined) ->
+    get_delta_operations(Type, OldVarState, lasp_type:new(Type));
+get_delta_operations(Type, undefined, undefined) ->
+    get_delta_operations(Type, lasp_type:new(Type), lasp_type:new(Type));
+get_delta_operations(Type, OldVarState, NewVarState) ->
+    Types = [
+        {state_gcounter, state_gcounter_ext},
+        {state_pncounter, state_pncounter_ext},
+        {state_gset, state_gset_ext},
+        {state_orset, state_orset_ext},
+        {state_twopset, state_twopset_ext}
+    ],
+    Predicate = fun({Current, _}) -> Current == Type end,
+    case lists:search(Predicate, Types) of {value, {_, Module}} ->
+        Module:delta_operations(OldVarState, NewVarState);
+    _ -> [] end.
 
 read_temp() ->
     pmod_nav:read(acc , [out_temp]).
@@ -156,7 +159,7 @@ read_temp() ->
 create_table(Name) ->
     case ets:info(Name, size) of
       undefined ->
-        ets:new(Name , [
+        T = ets:new(Name , [
             ordered_set
             , public
             , named_table
@@ -196,6 +199,7 @@ remotes_to_atoms([]) ->
     [].
 
 fetch_resolv_conf() ->
+
     {ok , F} = case os:type() of
                    {unix , rtems} ->
                        {ok , "nofile"};
@@ -214,7 +218,7 @@ bitstring_name() ->
     atom_to_binary(node() , utf8).
 
 get_inet_least_significant() ->
-  {ok, [{{_,_,_,In},_,_}|_T]} = inet:getif(),
+  {ok, [{{_,_,_,In},_,_}|T]} = inet:getif(),
   integer_to_binary(In).
 
 %% https://stackoverflow.com/a/12795014/6687529
@@ -270,17 +274,14 @@ do_disconnect(6) ->
     net_kernel:disconnect(achlys@my_grisp_board_6).
 
 rainbow_test() ->
-    achlys:bite(achlys:declare(rainbow
-        ,all
-        ,permanent
-        ,achlys_task_container:rainbow())).
+    achlys:bite(achlys:declare(t,all,permanent,fun() -> achlys:rainbow() end)).
 
 add_node(Node) when is_atom(Node) ->
     achlys_config:set(boards, [Node] ++ achlys_config:get(boards, [])).
 
 
 %%====================================================================
-%% NOTE: Binary encoding of values propagated through CRDTs instead
+%% TODO: Binary encoding of values propagated through CRDTs instead
 %% of propagating tuples directly in the cluster
 %%
 %% 32 bits :

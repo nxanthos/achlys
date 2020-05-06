@@ -173,11 +173,13 @@ declare(Name, all, single, Func) ->
     , targets => task_flag(all)
     , execution_type => task_flag(single)
     , function => Func};
-declare(Name, Targets, permanent, Func) when is_list(Targets) ->
-    #{name => Name
-    , targets => Targets
-    , execution_type => task_flag(permanent)
-    , function => Func}.
+% declare(Name, Targets, permanent, Func) when is_list(Targets) ->
+%     #{name => Name
+%     , targets => Targets
+%     , execution_type => task_flag(permanent)
+%     , function => Func}.
+declare(Name, Targets, ExecType, Func) ->
+    achlys_util:declare(Name, Targets, ExecType, Func).
 
 -spec rainbow() -> erlang:function().
 rainbow() ->
