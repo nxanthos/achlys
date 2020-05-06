@@ -57,7 +57,8 @@ init([]) ->
             , ?CHILD(achlys_process_sup, supervisor)
             , ?CHILD(achlys_stream_reducer_sup, supervisor)
             , ?CHILD(achlys_lazy_stream_reducer_sup, supervisor)
-            , ?CHILD(achlys_spawn, worker)
+            , ?CHILD(achlys_mr_worker, worker)
+            , ?CHILD(achlys_mr, worker)
             , ?CHILD(achlys_view, worker)
             , ?CHILD(achlys_pmod_worker_sup, supervisor)
         ]}

@@ -94,6 +94,17 @@ get_pmod_nav_temp_task() ->
 %% Utility functions
 %%====================================================================
 
+myself() ->
+    case (lasp_peer_service:manager()):myself() of
+        #{ name := Name } -> Name
+    end.
+
+get_neighbors() ->
+    case achlys:members() of {ok, L} ->
+        Name = achlys_util:myself(),
+        lists:filter(fun(X) -> not (X == Name) end, L)
+    end.
+
 query(Name , Type) when is_atom(Name), is_atom(Type) ->
     {ok , S} = lasp:query({atom_to_binary(Name , utf8) , Type}) ,
     sets:to_list(S).
