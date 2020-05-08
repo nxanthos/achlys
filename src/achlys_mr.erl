@@ -4,6 +4,7 @@
 -export([
     handle_cast/2,
     handle_call/3,
+    handle_info/2,
     init/1
 ]).
 
@@ -27,14 +28,13 @@ handle_cast({schedule, Process, Entries, Reduce, Options}, State) ->
         {ok, ID} ->
             Pid = erlang:spawn(fun() ->
                 Pairs = map_phase(Entries),
-                start_round(
-                    Process,
-                    ID,
-                    1,
-                    Pairs,
-                    Reduce,
-                    Options
-                )
+                case reduce_phase(ID, Pairs, Reduce, Options) of
+                    {error, Reason} ->
+                        gen_server:cast(?MODULE, {free, ID}),
+                        Process ! {error, Reason};
+                    {ok, Result} ->
+                        Process ! {ok, Result}
+                end
             end),
             NextState = orddict:store(ID, Pid, State),
             {noreply, NextState}
@@ -50,8 +50,12 @@ handle_cast({on_reduce, Message}, State) ->
             pairs := Pairs
         }
     } ->
-        case orddict:find(ID, State) of {ok, Pid} ->
-            Pid ! {ok, {Name, Pairs}}
+        case orddict:find(ID, State) of
+            {ok, Pid} ->
+                Pid ! {ok, {Name, Pairs}};
+            _ ->
+                io:format("The task no longer exists: The message has been dropped~n"),
+                ok
         end
     end,
     {noreply, State};
@@ -62,6 +66,9 @@ handle_cast({free, ID}, State) ->
     NextState = orddict:erase(ID, State),
     {noreply, NextState};
 handle_cast(_Request, State) ->
+    {noreply, State}.
+
+handle_info(_Request, State) ->
     {noreply, State}.
 
 % Map phase:
@@ -79,112 +86,161 @@ map_phase(Entries) ->
 % Reduce phase :
 
 % @pre -
+% @post -
+is_irreductible(InputPairs, OutputPairs) ->
+    lists:sort(InputPairs) == lists:sort(OutputPairs).
+
+% @pre -
+% @post -
+reduce_phase(ID, Pairs, Reduce, Options) ->
+    start_round(ID, 1, Pairs, Reduce, Options).
+
+% @pre -
+% @post -
+start_round(ID, Round, InputPairs, Reduce, Options) ->
+    MaxRound = maps:get(max_round, Options),
+    case Round =< MaxRound of
+        false ->
+            {error, "Max round reached"};
+        true ->
+            case get_reduction(ID, InputPairs, Reduce, Options) of
+                {error, Reason} ->
+                    {error, Reason};
+                {ok, OutputPairs} ->
+                    case is_irreductible(InputPairs, OutputPairs) of
+                        true ->
+                            {ok, OutputPairs};
+                        false ->
+                            start_round(
+                                ID,
+                                Round + 1,
+                                OutputPairs,
+                                Reduce,
+                                Options
+                            )
+                    end
+            end
+    end.
+
+% @pre -
 % @post - This function should return a list of tuples:
-%       {
-%           {Name of the batch, [{Key 1, Value 1}, {Key 2, Value 2}]},
-%           {Name of the batch, [{Key 3, Value 3}]},
-%       }
-get_batches(InputPairs) ->
+%       [
+%           {ID, [{Key 1, Value 1}, {Key 2, Value 2}]},
+%           {ID, [{Key 3, Value 3}]}
+%       ]
+get_batches(InputPairs, Options) ->
     Groups = lists:foldl(fun(Pair, Orddict) ->
         case Pair of {Key, _} ->
             orddict:append(Key, Pair, Orddict)
         end
     end, orddict:new(), InputPairs),
-    orddict:to_list(Groups).
+    Fun = fun({_, Pairs}) ->
+        Name = erlang:unique_integer([monotonic, positive]),
+        {Name, Pairs}
+    end,
+    lists:map(Fun, orddict:to_list(Groups)).
 
 % @pre -
 % @post -
 choose_node() ->
-    L = achlys_util:get_neighbors(),
-    erlang:hd(L).
+    case achlys_util:get_neighbors() of
+        [] -> [];
+        [H|_T] -> H
+    end.
 
 % @pre -
 % @post - This function should return a list of tuples
-%       {
-%           {Name of the batch, [Node 1]},
-%           {Name of the batch, [Node 1, Node 2]}
-%       }
-reduce_phase(ID, Batches, Reduce) ->
-    lists:foldl(fun(Batch, Dispatching) ->
-        {Name, Pairs} = Batch,
-        Node = choose_node(),
-        partisan_peer_service:cast_message(
-            Node,
-            achlys_mr_worker,
-            {reduce, #{
-                header => #{
-                    src => achlys_util:myself()
-                },
-                payload => #{
-                    id => ID,
-                    batch => Name,
-                    pairs => Pairs,
-                    reduce => Reduce
-                }
-            }}
-        ),
-        orddict:append(Name, Node, Dispatching)
-    end, orddict:new(), Batches).
+%       [
+%           {{Batch ID, [Node 1]},
+%           {{Batch ID, [Node 1, Node 2]}
+%       ]
+dispatch_tasks(ID, Batches, Reduce) ->
+    Dispatching = orddict:new(),
+    dispatch_tasks(ID, Batches, Dispatching, Reduce).
+
+dispatch_tasks(ID, Batches, Dispatching, Reduce) ->
+    lists:foldl(fun({Name, Pairs}, Acc) ->
+        case choose_node() of
+            [] ->
+                MySelf = self(),
+                erlang:send(achlys_mr_worker, {reduce, #{
+                    header => #{
+                        src => MySelf
+                    },
+                    payload => #{
+                        batch => Name,
+                        pairs => Pairs,
+                        reduce => Reduce
+                    }
+                }}),
+                orddict:append(Name, self(), Acc);
+            Node ->
+                % TODO: Avoid sending the task to the same node
+                MySelf = achlys_util:myself(),
+                partisan_peer_service:cast_message(
+                    Node,
+                    achlys_mr_worker,
+                    {reduce, #{
+                        header => #{
+                            src => MySelf
+                        },
+                        payload => #{
+                            id => ID,
+                            batch => Name,
+                            pairs => Pairs,
+                            reduce => Reduce
+                        }
+                    }}
+                ),
+                orddict:append(Name, Node, Acc)
+        end
+    end, Dispatching, Batches).
 
 % @pre -
 % @post -
-has_changed(InputPairs, OutputPairs) ->
-    lists:sort(InputPairs) =:= lists:sort(OutputPairs).
+get_reduction(ID, InputPairs, Reduce, Options) ->
+    Batches = get_batches(InputPairs, Options),
+    Dispatching = dispatch_tasks(ID, Batches, Reduce),
+    N = maps:get(max_attempts, Options),
+    Acc = {Batches, Dispatching, []},
+    % io:format("Batches: ~p~n", [Batches]),
+    % io:format("Dispatching: ~p~n", [Dispatching]),
+    receive_all(N, ID, Reduce, Options, Acc).
 
 % @pre -
 % @post -
-start_round(Process, ID, Round, Pairs, Reduce, Options) ->
-    MaxRound = maps:get(max_round, Options),
-    case Round =< MaxRound of
-        false ->
-            Process ! {error, "Max round reached"};
-        true ->
-            round(
-                Process,
-                ID,
-                Round,
-                Pairs,
-                Reduce,
-                Options
-            )
+receive_all(K, _ID, _Reduce, _Options, _Acc) when K =< 0 ->
+    {error, max_attempts_reached};
+receive_all(K, ID, Reduce, Options, Acc) ->
+    case receive_all(Acc, Options) of
+        {ok, OutputPairs} ->
+            {ok, OutputPairs};
+        {timeout, {Batches, Dispatching, Pairs}} ->
+            io:format("Timeout: Retrying~n"),
+            receive_all(K - 1, ID, Reduce, Options, {
+                Batches,
+                dispatch_tasks(ID, Batches, Dispatching, Reduce),
+                Pairs
+            })
     end.
 
 % @pre -
-% @post -
-round(Process, ID, Round, InputPairs, Reduce, Options) ->
-    Batches = get_batches(InputPairs),
-    Dispatching = reduce_phase(ID, Batches, Reduce),
-
-    % TODO: Add a retry mechanism
-    % TODO: Get batch of limited size
-
-    OutputPairs = receive_all([], Dispatching),
-    case has_changed(InputPairs, OutputPairs) of
-        true ->
-            gen_server:cast(?MODULE, {free, ID}),
-            Process ! {ok, OutputPairs};
-        false ->
-            start_round(
-                Process,
-                ID,
-                Round + 1,
-                OutputPairs,
-                Reduce,
-                Options
-            )
-    end.
-
-% @pre -
-% @post -
-receive_all(Acc, Dispatching) ->
+% @post - Acc = {Batches, Dispatching, Pairs}
+receive_all(Acc, Options) ->
+    Timeout = maps:get(timeout, Options),
+    {Batches, Dispatching, OutputPairs} = Acc,
     case orddict:is_empty(Dispatching) of
-        true -> Acc;
+        true ->
+            {ok, OutputPairs};
         false ->
             receive {ok, {Name, Pairs}} ->
-                receive_all(
-                    Pairs ++ Acc,
-                    orddict:erase(Name, Dispatching)
-                )
+                receive_all({
+                    orddict:erase(Name, Batches),
+                    orddict:erase(Name, Dispatching),
+                    OutputPairs ++ Pairs
+                }, Options)
+            after Timeout ->
+                {timeout, Acc}
             end
     end.
 
@@ -196,7 +252,7 @@ schedule(Entries, Reduce) ->
         max_round => 10,
         max_attempts => 3,
         max_batch_cardinality => 2,
-        timeout => 1000
+        timeout => 3000
     }).
 
 % @pre -
@@ -209,8 +265,8 @@ schedule(Entries, Reduce, Options) ->
         Options
     }),
     receive
-        {ok, Pairs} ->
-            Pairs;
+        {ok, Result} ->
+            Result;
         {error, Reason} ->
             io:format("Error: ~p~n", [Reason]),
             []

@@ -3,6 +3,7 @@
 -export([
     handle_cast/2,
     handle_call/3,
+    handle_info/2,
     init/1
 ]).
 -export([
@@ -38,7 +39,6 @@ handle_cast({reduce, Message}, State) ->
             reduce := Reduce
         }
     } ->
-        Groups = group_pairs_per_key(Pairs),
         partisan_peer_service:cast_message(
             Node,
             achlys_mr,
@@ -49,21 +49,33 @@ handle_cast({reduce, Message}, State) ->
                 payload => #{
                     id => ID,
                     batch => Name,
-                    pairs => reduce(Groups, Reduce)
+                    pairs => reduce(Pairs, Reduce)
                 }
             }}
-        )
-    end,
+        );
+    _ -> io:format("Unknown message~n") end,
     {noreply, State};
 handle_cast(_Request, State) ->
     {noreply, State}.
 
 % @pre -
 % @post -
-reduce(Groups, Reduce) ->
-    lists:flatmap(fun({Key, Pairs}) ->
-        erlang:apply(Reduce, [Key, Pairs])
-    end, Groups).
+handle_info({reduce, Message}, State) ->
+    case Message of #{
+        header := #{
+            src := Pid
+        },
+        payload := #{
+            batch := Name,
+            pairs := Pairs,
+            reduce := Reduce
+        }
+    } -> Pid ! {ok, {Name, reduce(Pairs, Reduce)}} end,
+    {noreply, State};
+handle_info(_Info, State) ->
+    {noreply, State}.
+
+% Helpers:
 
 % @pre -
 % @post -
@@ -75,3 +87,14 @@ group_pairs_per_key(Pairs) ->
         end
     end, orddict:new(), Pairs),
     orddict:to_list(Groups).
+
+% @pre -
+% @post -
+reduce(InputPairs, Reduce) ->
+    % Delay = erlang:trunc(10000 * random:uniform()),
+    % io:format("Task received: Sleeping ~pms~n", [Delay]),
+    % timer:sleep(Delay),
+    Groups = group_pairs_per_key(InputPairs),
+    lists:flatmap(fun({Key, Pairs}) ->
+        erlang:apply(Reduce, [Key, Pairs])
+    end, Groups).
