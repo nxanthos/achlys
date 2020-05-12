@@ -7,6 +7,7 @@
 
 % API:
 -export([
+    all/1,
     all/2,
     all/3
 ]).
@@ -52,6 +53,14 @@ barrier_loop(N, Tasks, Results) ->
                 Results
             )
     end.
+
+% @pre -
+% @post -
+all(Entries) ->
+    all(Entries, #{
+        max_attempts => 1,
+        timeout => infinity
+    }).
 
 % @pre -
 % @post -
