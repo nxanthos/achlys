@@ -1,6 +1,10 @@
 -module(achlys_mr).
 -behavior(gen_server).
 -define(TYPE, state_gset).
+-define(GC_INTERVAL, 20000).
+
+% achlys_mr:test().
+% achlys_mr:debug().
 
 -export([
     handle_cast/2,
@@ -14,7 +18,7 @@
 -export([
     schedule/2,
     schedule/3,
-    test/0,
+    gc/0,
     debug/0
 ]).
 
@@ -33,7 +37,8 @@
 
 -record(master_struct, {
     worker :: identifier(),
-    round = 0 :: non_neg_integer()
+    round = 0 :: non_neg_integer(),
+    finished = false :: boolean()
 }).
 
 % @pre -
@@ -44,6 +49,7 @@ start_link() ->
 % @pre -
 % @post -
 init([]) ->
+    erlang:send_after(?GC_INTERVAL, ?MODULE, gc),
     {ok, orddict:new()}.
 
 % Handle cast:
@@ -55,6 +61,7 @@ handle_cast({schedule, [_Entries, _Reduce, _Options] = Args}, State) ->
         {ok, ID} ->
             case achlys_mr_job:start_link(ID, Args) of
                 {ok, Worker} ->
+                    io:format("The node becomes a master~n"),
                     {noreply, orddict:store(ID, #master_struct{
                         worker = Worker
                     }, State)}
@@ -67,6 +74,7 @@ handle_cast({schedule, [_Entries, _Reduce, _Options] = Args}, State) ->
 handle_cast({continue, ID}, State) ->
     case orddict:find(ID, State) of
         {ok, #master_struct{}} ->
+            % Local execution
             io:format("A process is already running~n"),
             {noreply, State};
         {ok, #observer_struct{
@@ -76,6 +84,7 @@ handle_cast({continue, ID}, State) ->
             reduce = Reduce,
             options = Options
         }} ->
+            % Remote execution
             io:format("The node becomes a master~n"),
             clear_timeout(Timer),
             Args = [Round, Pairs, Reduce, Options],
@@ -93,7 +102,7 @@ handle_cast({continue, ID}, State) ->
 % @pre -
 % @post -
 handle_cast({stop, ID}, State) ->
-    io:format("The reduction is over~n"),
+    io:format("The reduction has been completed by another master~n"),
     case orddict:find(ID, State) of
         {ok, #master_struct{
             worker = Worker
@@ -122,6 +131,7 @@ handle_cast({update, ID, Args}, State) ->
             % Local execution
             case Round > Struct#master_struct.round of
                 true ->
+                    io:format("The node becomes an observer~n"),
                     erlang:exit(Worker, kill),
                     Delay = get_delay(Options),
                     Timer = set_timeout(fun() ->
@@ -143,6 +153,7 @@ handle_cast({update, ID, Args}, State) ->
             % Remote execution
             case Round > Struct#observer_struct.round of
                 true ->
+                    io:format("The timer has been reset~n"),
                     clear_timeout(Timer),
                     Delay = get_delay(Options),
                     NewTimer = set_timeout(fun() ->
@@ -161,6 +172,7 @@ handle_cast({update, ID, Args}, State) ->
                     {noreply, State}
             end;
         _ ->
+            io:format("A new MapReduce has been started by another node~n"),
             Delay = get_delay(Options),
             Timer = set_timeout(fun() ->
                 gen_server:cast(?MODULE, {continue, ID})
@@ -192,6 +204,7 @@ handle_cast({notify, Message}, State) ->
     } ->
         case Finished of
             true ->
+                io:format("A remote master has completed the reduction~n"),
                 OVar = maps:get(variable, Options),
                 bind_output_var(OVar, Pairs),
                 gen_server:cast(?MODULE, {stop, ID});
@@ -228,16 +241,44 @@ handle_call(_Request, _From, State) ->
 % @pre -
 % @post -
 handle_info({new_round, ID, Round}, State) ->
-    io:format("New round started: Round n°~p~n", [Round]),
     case orddict:find(ID, State) of
         {ok, #master_struct{} = Struct} ->
-            io:format("Updating the round~n"),
+            io:format("A new round has been completed (~p)~n", [Round]),
             {noreply, orddict:store(ID, Struct#master_struct{
                 round = Round
             }, State)};
         _ ->
             {noreply, State}
     end;
+
+% @pre -
+% @post -
+handle_info({finish, ID, OVar, Pairs}, State) ->
+    case orddict:find(ID, State) of
+        {ok, #master_struct{} = Struct} ->
+            bind_output_var(OVar, Pairs),
+            {noreply, orddict:store(ID, Struct#master_struct{
+                finished = true
+            }, State)};
+        _ ->
+            {noreply, State}
+    end;
+
+% @pre -
+% @post -
+handle_info(gc, State) ->
+    % io:format("Starting the garbage collection~n"),
+    erlang:send_after(?GC_INTERVAL, ?MODULE, gc),
+    {noreply, orddict:filter(fun(_Key, Struct) ->
+        case Struct of
+            #master_struct{
+                finished = Finished
+            } -> not Finished;
+            #observer_struct{
+                finished = Finished
+            } -> not Finished
+        end
+    end, State)};
 
 % @pre -
 % @post -
@@ -269,6 +310,12 @@ schedule(Entries, Reduce, Options) ->
 % @post -
 debug() ->
     gen_server:cast(?MODULE, debug).
+
+% @pre -
+% @post -
+gc() ->
+    Pid = erlang:whereis(?MODULE),
+    erlang:send(Pid, gc).
 
 % Helpers:
 

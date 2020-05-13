@@ -37,11 +37,34 @@ example_1() ->
     end),
 
     case lasp:read(OVar, {strict, undefined}) of
-        {ok, {_, _, _, VarState}} ->
-            io:format("OVar=~p~n", [VarState])
+        {ok, {_, _, _, Var}} ->
+            io:format("OVar=~p~n", [Var])
     end.
 
 % @pre -
 % @post -
 example_2() ->
-    ok.
+
+    lasp_peer_service:join('achlys1@192.168.1.6'),
+    timer:sleep(500),
+
+    IVar = {<<"table">>, state_gset},
+    Path = "dataset/data.csv",
+    file_reader:load_csv(Path, IVar),
+
+    OVar = achlys_mr:schedule([
+        {IVar, fun(Value) -> % Map
+            case Value of {_ID, #{
+                country := Country,
+                temperature := Temperature
+            }} -> [{Country, Temperature}];
+            _ -> [] end
+        end}
+    ], fun(Key, Values) -> % Reduce
+        [{Key, lists:max(Values)}]
+    end),
+    
+    case lasp:read(OVar, {strict, undefined}) of
+        {ok, {_, _, _, Var}} ->
+            io:format("OVar=~p~n", [Var])
+    end.

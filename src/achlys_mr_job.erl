@@ -11,24 +11,21 @@ start_link(ID, [Entries, Reduce, Options]) ->
 
     Parent = self(),
     Pid = erlang:spawn(fun() ->
-
         Pairs = map_phase(Entries),
-        Round = 1,
-
-        erlang:send(Parent, {new_round, ID, Round}),
         broadcast(achlys_mr, {notify, #{
             header => #{
                 src => achlys_util:myself()
             },
             payload => #{
                 id => ID,
-                round => Round,
+                round => 0,
                 reduce => Reduce,
                 pairs => Pairs,
                 finished => false,
                 options => Options
             }
         }}),
+        Round = 1,
         start_round(Parent, ID, Round, Pairs, Reduce, Options)
     end),
     {ok, Pid};
@@ -61,9 +58,9 @@ map_phase(Entries) ->
 broadcast(Module, Message) ->
     % TODO: Broadcast with plumtree
     % Neighbors = achlys_util:get_neighbors(),
+    io:format("Broadcasting the solution~n"),
     {ok, Neighbors} = achlys:members(),
     lists:foreach(fun(Node) ->
-        io:format("Sending solution to ~p~n", [Node]),
         partisan_peer_service:cast_message(Node, Module, Message)
     end, Neighbors).
 
@@ -107,7 +104,11 @@ start_round(Parent, ID, Round, InputPairs, Reduce, Options) ->
                     case Finished of
                         true ->
                             OVar = maps:get(variable, Options),
-                            bind_output_var(OVar, OutputPairs);
+                            erlang:send(Parent, {finish,
+                                ID,
+                                OVar,
+                                OutputPairs
+                            });
                         false ->
                             start_round(
                                 Parent,
@@ -185,13 +186,3 @@ get_reduction(InputPairs, Reduce, Options) ->
         max_attempts_reached ->
             {error, max_attempts_reached}
     end.
-
-% @pre -
-% @post -
-bind_output_var(Var, Pairs) ->
-    N = erlang:length(Pairs),
-    lasp:bind(Var, {state_gset, lists:zip(
-        lists:seq(1, N),
-        lists:sort(Pairs)
-    )}),
-    io:format("Pairs=~p~n", [Pairs]).
