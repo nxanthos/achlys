@@ -14,10 +14,27 @@
 -export([
     schedule/2,
     schedule/3,
+    test/0,
     debug/0
 ]).
 
-% TODO: Define record and use erlang:is_record/2
+% =============================================
+% Records:
+% =============================================
+
+-record(observer_struct, {
+    timer :: identifier(),
+    round = 0 :: non_neg_integer(),
+    pairs = [] :: list(),
+    reduce :: function(),
+    options :: map(),
+    finished = false :: boolean()
+}).
+
+-record(master_struct, {
+    worker :: identifier(),
+    round = 0 :: non_neg_integer()
+}).
 
 % @pre -
 % @post -
@@ -38,34 +55,35 @@ handle_cast({schedule, [_Entries, _Reduce, _Options] = Args}, State) ->
         {ok, ID} ->
             case achlys_mr_job:start_link(ID, Args) of
                 {ok, Worker} ->
-                    {noreply, orddict:store(ID, #{
-                        worker => Worker,
-                        round => 0
+                    {noreply, orddict:store(ID, #master_struct{
+                        worker = Worker
                     }, State)}
             end
     end;
 
 % @pre -
 % @post -
+
 handle_cast({continue, ID}, State) ->
     case orddict:find(ID, State) of
-        {ok, #{worker := _Worker}} ->
+        {ok, #master_struct{}} ->
             io:format("A process is already running~n"),
             {noreply, State};
-        {ok, #{
-            round := Round,
-            pairs := Pairs,
-            reduce := Reduce,
-            options := Options
-        } = Entry} ->
+        {ok, #observer_struct{
+            timer = Timer,
+            round = Round,
+            pairs = Pairs,
+            reduce = Reduce,
+            options = Options
+        }} ->
             io:format("The node becomes a master~n"),
-            clear_timeout(maps:get(timer, Entry)),
+            clear_timeout(Timer),
             Args = [Round, Pairs, Reduce, Options],
             case achlys_mr_job:start_link(ID, Args) of
                 {ok, Worker} ->
-                    {noreply, orddict:store(ID, #{
-                        worker => Worker,
-                        round => Round
+                    {noreply, orddict:store(ID, #master_struct{
+                        worker = Worker,
+                        round = Round
                     }, State)}
             end;
         _ ->
@@ -77,11 +95,15 @@ handle_cast({continue, ID}, State) ->
 handle_cast({stop, ID}, State) ->
     io:format("The reduction is over~n"),
     case orddict:find(ID, State) of
-        {ok, #{worker := Worker}} ->
+        {ok, #master_struct{
+            worker = Worker
+        }} ->
             % Local execution
             erlang:exit(Worker, kill),
             {noreply, orddict:erase(ID, State)};
-        {ok, #{timer := Timer}} ->
+        {ok, #observer_struct{
+            timer = Timer
+        }} ->
             % Remote execution
             clear_timeout(Timer),
             {noreply, orddict:erase(ID, State)};
@@ -94,41 +116,45 @@ handle_cast({stop, ID}, State) ->
 handle_cast({update, ID, Args}, State) ->
     [Round, Pairs, Reduce, Options] = Args,
     case orddict:find(ID, State) of
-        {ok, #{worker := Worker} = Entry} ->
+        {ok, #master_struct{
+            worker = Worker
+        } = Struct} ->
             % Local execution
-            case Round > maps:get(round, Entry) of
+            case Round > Struct#master_struct.round of
                 true ->
                     erlang:exit(Worker, kill),
                     Delay = get_delay(Options),
                     Timer = set_timeout(fun() ->
                         gen_server:cast(?MODULE, {continue, ID})
                     end, [], Delay),
-                    {noreply, orddict:store(ID, #{
-                        timer => Timer,
-                        round => Round,
-                        pairs => Pairs,
-                        reduce => Reduce,
-                        options => Options
+                    {noreply, orddict:store(ID, #observer_struct{
+                        timer = Timer,
+                        round = Round,
+                        pairs = Pairs,
+                        reduce = Reduce,
+                        options = Options
                     }, State)};
                 false ->
                     {noreply, State}
             end;
-        {ok, Entry} ->
+        {ok, #observer_struct{
+            timer = Timer
+        } = Struct} ->
             % Remote execution
-            case Round > maps:get(round, Entry) of
+            case Round > Struct#observer_struct.round of
                 true ->
-                    clear_timeout(maps:get(timer, Entry)),
+                    clear_timeout(Timer),
                     Delay = get_delay(Options),
-                    Timer = set_timeout(fun() ->
+                    NewTimer = set_timeout(fun() ->
                         gen_server:cast(?MODULE, {continue, ID})
                     end, [], Delay),
                     {noreply, orddict:store(
                         ID,
-                        maps:merge(Entry, #{
-                            timer => Timer,
-                            round => Round,
-                            pairs => Pairs
-                        }),
+                        Struct#observer_struct{
+                            timer = NewTimer,
+                            round = Round,
+                            pairs = Pairs
+                        },
                         State
                     )};
                 false ->
@@ -139,12 +165,12 @@ handle_cast({update, ID, Args}, State) ->
             Timer = set_timeout(fun() ->
                 gen_server:cast(?MODULE, {continue, ID})
             end, [], Delay),
-            {noreply, orddict:store(ID, #{
-                timer => Timer,
-                round => Round,
-                pairs => Pairs,
-                reduce => Reduce,
-                options => Options
+            {noreply, orddict:store(ID, #observer_struct{
+                timer = Timer,
+                round = Round,
+                pairs = Pairs,
+                reduce = Reduce,
+                options = Options
             }, State)}
     end;
 
@@ -204,11 +230,10 @@ handle_call(_Request, _From, State) ->
 handle_info({new_round, ID, Round}, State) ->
     io:format("New round started: Round n°~p~n", [Round]),
     case orddict:find(ID, State) of
-        {ok, #{worker := Worker}} ->
+        {ok, #master_struct{} = Struct} ->
             io:format("Updating the round~n"),
-            {noreply, orddict:store(ID, #{
-                worker => Worker,
-                round => Round
+            {noreply, orddict:store(ID, Struct#master_struct{
+                round = Round
             }, State)};
         _ ->
             {noreply, State}
@@ -263,7 +288,9 @@ clear_timeout(Timer) ->
 % @pre -
 % @post -
 get_delay(Options) ->
-    1000.
+    Min = 1000,
+    Max = 3000,
+    Min + erlang:trunc(rand:uniform() * ((Max - Min) + 1)).
 
 % @pre -
 % @post -
