@@ -102,7 +102,17 @@ handle_cast({return, ID, Result}, State) ->
 handle_cast({return_forward, ID, Result}, State) ->
     case State of #{forwarded_tasks := Forwarded} ->
         Task = maps:get(ID, Forwarded),
-        case Task of #{callback := Callback} ->
+        case Task of 
+            #{hops := [Node|_]} -> % if the task is not a local task but a task forwarded by the node Node
+                Remote_ID = maps:get(id, Task), 
+                io:format("Returning the result to the original node~n"),
+                % unicast the result (respond) to the node that sent the task
+                partisan_peer_service:cast_message(
+                    Node,
+                    achlys_spawn,
+                    {return_forward, Remote_ID, Result}
+                );
+            #{hops := [], callback := Callback} ->
                 io:format("Forwarded task ~p return a result ~n", [ID]),
                 erlang:apply(Callback, [Result])
         end,
@@ -114,14 +124,12 @@ handle_cast({update}, State) ->
     case State of #{running_tasks := Running, scheduled_tasks := Scheduled, forwarded_tasks := _} ->
         case maps:size(Scheduled) > 0 of
             true -> % there are tasks in Schedule, we have move a task from Scheduled to Running
-                io:format("TRUE ~n"),
                 [New_ID|_] = maps:keys(Scheduled), % get the first task's key (=ID) of Scheduled
                 New_running_task = maps:get(New_ID, Scheduled), % get the first task of Scheduled
                 gen_server:cast(?MODULE, {execute, New_ID}), % execute the new task
                 {noreply, State#{running_tasks := maps:put(New_ID, New_running_task, Running), scheduled_tasks := maps:remove(New_ID, Scheduled)}};
             
             false -> % There is no tasks in Schedule
-                io:format("FALSE ~n"),
                 {noreply, State}
         end
     end;
@@ -189,7 +197,8 @@ get_name() ->
     Name.
 
 % Choose a node among the neighbors except the nodes in Blacklist
-choose_node(Blacklist) ->
+choose_node(BL) ->
+    Blacklist = [get_name()|BL],
     {ok, Members} = partisan_peer_service:members(),
     Nodes = lists:filter(fun(Member) ->
         lists:member(Member, Blacklist) == false
