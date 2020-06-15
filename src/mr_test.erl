@@ -1,18 +1,17 @@
 -module(mr_test).
 -export([
     example_1/0,
-    example_2/0
+    example_2/0,
+    example_3/0
 ]).
 
 % mr_test:example_1().
 % mr_test:example_2().
+% mr_test:example_3().
 
 % @pre -
 % @post -
 example_1() ->
-    
-    lasp_peer_service:join('achlys1@192.168.1.6'),
-    timer:sleep(500),
 
     IVar1 = {<<"a">>, state_gset},
     IVar2 = {<<"b">>, state_gset},
@@ -45,9 +44,6 @@ example_1() ->
 % @post -
 example_2() ->
 
-    lasp_peer_service:join('achlys1@192.168.1.6'),
-    timer:sleep(500),
-
     IVar = {<<"table">>, state_gset},
     Path = "dataset/data.csv",
     file_reader:load_csv(Path, IVar),
@@ -64,6 +60,34 @@ example_2() ->
         [{Key, lists:max(Values)}]
     end),
     
+    case lasp:read(OVar, {strict, undefined}) of
+        {ok, {_, _, _, Var}} ->
+            io:format("OVar=~p~n", [Var])
+    end.
+
+% @pre -
+% @post -
+example_3() ->
+
+    IVar = {<<"documents">>, state_gset},
+    lasp:bind(IVar, {state_gset, [
+        "This is my cats",
+        "The cats are over there",
+        "I love cats"
+    ]}),
+    lasp:read(IVar, {cardinality, 3}),
+
+    OVar = achlys_mr:schedule([
+        {IVar, fun(Value) -> % Map
+            L = string:tokens(Value, " "),
+            orddict:to_list(lists:foldl(fun(Word, Counters) ->
+                orddict:update_counter(Word, 1, Counters)
+            end, orddict:new(), L))
+        end}
+    ], fun(Key, Values) -> % Reduce
+        [{Key, lists:sum(Values)}]
+    end),
+
     case lasp:read(OVar, {strict, undefined}) of
         {ok, {_, _, _, Var}} ->
             io:format("OVar=~p~n", [Var])
