@@ -68,11 +68,9 @@ handle_cast({schedule, Task}, State) ->
 %   Add in index the tuple {id, list} where id is the id of the task and list is the list in which the task has been dispatched.
 handle_cast({schedule, ID, Task}, State) ->
     case State of #{index := Index, running_tasks := Running, scheduled_tasks := Scheduled, forwarded_tasks := Forwarded} ->
-        io:format("A task has been scheduled~n"),
         Myself = get_name(),
         case maps:size(Running) < ?MAX_RUNNING of
             true ->
-                io:format("Task added in running list~n"),
                 {noreply, State#{
                     index := maps:put(ID, running_tasks, Index), % add the Id of the tasks to the Tasks list
                     running_tasks := maps:put(ID, Task, Running)
@@ -80,13 +78,11 @@ handle_cast({schedule, ID, Task}, State) ->
             false ->
                 case maps:size(Scheduled) < ?MAX_SCHEDULE of
                     true ->
-                        io:format("Task added in scheduled list~n"),
                         {noreply, State#{
                             index := maps:put(ID, scheduled_tasks, Index),
                             scheduled_tasks := maps:put(ID, Task, Scheduled)
                         }};
                     false ->
-                        % io:format("Task added in forward list~n"),
                         case Task of
                             #task{} -> % Task is a local task that the node forward
                                 case choose_node(Task#task.hops) of
@@ -133,7 +129,7 @@ handle_cast({execute, ID}, State) ->
                 Task = maps:get(ID, Running),
                 case Task of
                     #task{function = Fun, arguments = Args} ->
-                        io:format("Executing the task~n"),
+                        io:format("Executing a task~n"),
                         erlang:spawn(fun() ->
                             Result = erlang:apply(Fun, Args),
                             gen_server:cast(?MODULE, {return, ID, Result})
@@ -166,7 +162,7 @@ handle_cast({return, Local_ID, Result}, State) ->
                 case Task of
                     #forwarded_task{hops = [Node|_]} -> % Node is the sender of the forwarded_task
                         Remote_ID = Task#forwarded_task.id,
-                        io:format("Returning the result to the original node~n"),
+                        io:format("[return] Returning the result to the original node~n"),
                         % unicast the result (respond) to the node that sent the task
                         partisan_peer_service:cast_message(
                             Node,
@@ -205,9 +201,10 @@ handle_cast({return_forward, Local_ID, Result}, State) ->
                     forwarded_tasks -> Task = maps:get(Local_ID, Forwarded)
                 end,
                 case Task of 
-                    #forwarded_task{hops = [Node|_]} -> % Node is the sender of Task: unicast the result to Node
+                    #forwarded_task{timer = Timer, hops = [Node|_]} -> % Node is the sender of Task: unicast the result to Node
+                        clear_timeout(Timer),
                         Remote_ID = Task#forwarded_task.id,
-                        io:format("Returning the result to the original node~n"),
+                        io:format("[return forward] Returning the result to the original node~n"),
                         % unicast the result (respond) to the node that sent the task
                         partisan_peer_service:cast_message(
                             Node,
@@ -257,7 +254,6 @@ handle_cast({forward, ID, Node}, State) ->
                     achlys_spawn, 
                     {schedule, Task#forwarded_task{id = ID, hops = [get_name()|Task#forwarded_task.hops]}} % add this node to the hops
                 ),
-                io:format("The task has been forwarded~n"),
                 {noreply, State};
             false -> {noreply, State}
         end
@@ -369,7 +365,6 @@ handle_call(_Request, _From, State) ->
 % Info:
 
 handle_info(_Info, State) ->
-    io:format("Info: ~p~n", [_Info]),
     {noreply, State}.
 
 % Terminate:
@@ -419,11 +414,9 @@ set_timeout(Fun, Args, Delay) ->
 % @pre Timer is a process
 % @post The process Timer is kill
 clear_timeout(Timer) ->
-    case erlang:is_process_alive(Timer) of
-        true ->
-            erlang:exit(Timer, kill);
-        false ->
-            {noreply}
+    case Timer of
+        undefined -> {noreply};
+        _ -> erlang:exit(Timer, kill)
     end.
 
 % API:
