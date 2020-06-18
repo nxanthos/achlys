@@ -17,7 +17,7 @@
 %% under the License.
 %%
 %% -------------------------------------------------------------------
--module(plumtree_broadcast_handler).
+-module(achlys_plumtree_broadcast_handler).
 
 %% Return a two-tuple of message id and payload from a given broadcast
 -callback broadcast_data(any()) -> {any(), any()}.

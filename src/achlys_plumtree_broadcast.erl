@@ -17,7 +17,7 @@
 %% under the License.
 %%
 %% -------------------------------------------------------------------
--module(plumtree_broadcast).
+-module(achlys_plumtree_broadcast).
 
 -behaviour(gen_server).
 
@@ -177,8 +177,8 @@ start_link(InitMembers, InitEagers, InitLazys, Mods, Opts) ->
 %% `riak_core_broadcast_handler' behaviour.
 -spec broadcast(any(), module()) -> ok.
 broadcast(Broadcast, Mod) ->
-    {MessageId, Payload} = Mod:broadcast_data(Broadcast),
-    gen_server:cast(?SERVER, {broadcast, MessageId, Payload, Mod}).
+    {MessageId, Message} = Mod:broadcast_data(Broadcast),
+    gen_server:cast(?SERVER, {broadcast, MessageId, Message, Mod}).
 
 %% @doc Notifies broadcast server of membership update
 update(LocalState0) ->
