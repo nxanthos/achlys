@@ -5,10 +5,13 @@
     start_link/2
 ]).
 
-% @pre -
-% @post -
+% @pre  ID is a unique ID, identifying the MapReduce
+%       Entries is a list of tuples composed of a Variable and a map function {Var, fun}
+%       Reduce is a reduce function
+%       Options is map containing MapReduce options
+% @post start the map phase and broadcast the data for the reduction
+%       return the Pid of the master
 start_link(ID, [Entries, Reduce, Options]) ->
-
     Parent = self(),
     Pid = erlang:spawn(fun() ->
         Pairs = map_phase(Entries),
@@ -28,6 +31,7 @@ start_link(ID, [Entries, Reduce, Options]) ->
         Round = 1,
         start_round(Parent, ID, Round, Pairs, Reduce, Options)
     end),
+    logger:info("[MAPREDUCE][~p][M][~p]", [ID, achlys_util:myself()]),
     {ok, Pid};
 
 % @pre -
@@ -37,12 +41,13 @@ start_link(ID, [Round, Pairs, Reduce, Options]) ->
     Pid = erlang:spawn(fun() ->
         start_round(Parent, ID, Round, Pairs, Reduce, Options)
     end),
+    logger:info("[MAPREDUCE][~p][M][~p]", [ID, achlys_util:myself()]),
     {ok, Pid}.
 
 % Map phase:
 
-% @pre -
-% @post -
+% @pre Entries is a list of tuples composed of a Variable and a map function {Var, fun}
+% @post Return the result of the map phase
 map_phase(Entries) ->
     lists:flatmap(fun({IVar, Map}) ->
         Values = achlys_util:query(IVar),
@@ -53,16 +58,21 @@ map_phase(Entries) ->
 
 % Reduce phase:
 
-% @pre -
-% @post -
-broadcast(Module, Message) ->
-    % TODO: Broadcast with plumtree
-    % Neighbors = achlys_util:get_neighbors(),
+% @pre  Message is a message
+%       Module is a module that handle the message Message
+% e.g. broadcast(achlys_mr, {notify, #{}})
+% @post Broadcast Msg
+broadcast(Module, {notify, #{header := Header, payload := Payload}} = Message) ->
+    %% Broadcast with plumtree to all other nodes
     io:format("Broadcasting the solution~n"),
-    {ok, Neighbors} = achlys:members(),
-    lists:foreach(fun(Node) ->
-        partisan_peer_service:cast_message(Node, Module, Message)
-    end, Neighbors).
+    Msg = {Module, Message},
+    achlys_plumtree_broadcast:broadcast(Msg, achlys_plumtree_backend).
+
+    %% Broadcast with partisan to all (direct) neighbors
+    % {ok, Neighbors} = achlys:members(),
+    % lists:foreach(fun(Node) ->
+    %     partisan_peer_service:cast_message(Node, Module, Message)
+    % end, Neighbors).
 
 % @pre -
 % @post -
@@ -72,6 +82,7 @@ is_irreductible(InputPairs, OutputPairs) ->
 % @pre -
 % @post -
 start_round(Parent, ID, Round, InputPairs, Reduce, Options) ->
+    logger:info("[MAPREDUCE][~p][R][~p]", [ID, Round]),
     MaxRound = maps:get(max_round, Options),
     case Round =< MaxRound of
         false ->
@@ -103,6 +114,7 @@ start_round(Parent, ID, Round, InputPairs, Reduce, Options) ->
 
                     case Finished of
                         true ->
+                            logger:info("[MAPREDUCE][~p][F]", [ID]),
                             OVar = maps:get(variable, Options),
                             erlang:send(Parent, {finish,
                                 ID,
@@ -161,15 +173,16 @@ reduce(InputPairs, Reduce) ->
 % @pre -
 % @post -
 get_tasks(Batches, Reduce) ->
+    % This function should return a list of tuples :
+    
     lists:foldl(fun({Name, Pairs}, Acc) ->
         [{fun() ->
-            % TODO: Implements achlys_spawn
-            % This module will have the responsibility to execute
-            % the given function or send it to another node. The
-            % module should retransmit the task to another node if
-            % no response is given.
             timer:sleep(3000),
-            reduce(Pairs, Reduce)
+            P = achlys_spawn:schedule(fun() ->
+                reduce(Pairs, Reduce)
+            end, []),
+            io:format("Input=~p Output=~p~n", [Pairs, P]),            
+            P
         end, []}|Acc]
     end, [], Batches).
 

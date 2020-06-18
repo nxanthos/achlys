@@ -45,7 +45,7 @@ example_1() ->
 example_2() ->
 
     IVar = {<<"table">>, state_gset},
-    Path = "dataset/data.csv",
+    Path = "data.csv",
     file_reader:load_csv(Path, IVar),
 
     OVar = achlys_mr:schedule([
