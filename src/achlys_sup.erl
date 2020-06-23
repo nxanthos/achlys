@@ -58,7 +58,7 @@ init([]) ->
             , ?CHILD(achlys_stream_reducer_sup, supervisor)
             , ?CHILD(achlys_lazy_stream_reducer_sup, supervisor)
             , ?CHILD(achlys_mr, worker)
-            , ?CHILD(achlys_spawn, worker)
+            , ?CHILD(achlys_spawn_sup, supervisor)
             , ?CHILD(achlys_plumtree_broadcast, worker)
             , ?CHILD(achlys_plumtree_backend, worker)
             , ?CHILD(achlys_view, worker)
