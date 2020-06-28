@@ -13,8 +13,9 @@
 -export([
     on_schedule/2,
     on_return/2,
-    on_timeout/2,
+    on_delete/2,
     get_average_response_time/0,
+    get_timeout_per_second/0,
     choose_node/1,
     test/0,
     debug/0
@@ -28,6 +29,10 @@
 
 % TODO: Garbage collect les anciens logs 
 % TODO: Envoyer des messages avec la taille de la queue.
+
+% logs = #{ID => #{Node1 => Start}, ID2 => #{Node => Start}, ...}
+% on_timeout(Node, ID).
+% on_delete(Node, ID).
 
 init([]) ->
     {ok, #{
@@ -65,7 +70,7 @@ handle_cast({on_return, Node, ID}, State) ->
         end
     end;
 
-handle_cast({on_timeout, Node, ID}, State) ->
+handle_cast({on_delete, Node, ID}, State) ->
     case State of #{ logs := Logs } ->
         Key = {Node, ID},
         {noreply, State#{
@@ -86,6 +91,26 @@ handle_cast({get_average_response_time, Node}, State) ->
                 io:format("L=~p~n", [L]),
                 {noreply, State#{
                     response_times := orddict:store(Node, L, ResponseTimes)
+                }};
+            error ->
+                {noreply, State}
+        end
+    end;
+
+handle_cast({get_timeout_per_second, Node}, State) ->
+    case State of #{ timeouts := Timeouts } ->
+        case orddict:find(Node, Timeouts) of
+            {ok, Measures} ->
+                Lifespan = 1000,
+                Now = erlang:system_time(millisecond),
+                L = lists:takewhile(fun(Time) ->
+                    Now - Time < Lifespan
+                end, Measures),
+                io:format("Node=~p~n", [Node]),
+                io:format("L=~p~n", [L]),
+                % TODO: Calculer le temps de réponse
+                {noreply, State#{
+                    timeouts := orddict:store(Node, L, Timeouts)
                 }};
             error ->
                 {noreply, State}
@@ -171,14 +196,19 @@ on_return(Node, ID) ->
 
 % @pre -
 % @post -
-on_timeout(Node, ID) ->
-    gen_server:cast(?MODULE, {on_timeout, Node, ID}).
+on_delete(Node, ID) ->
+    gen_server:cast(?MODULE, {on_delete, Node, ID}).
 
 % @pre -
 % @post -
 get_average_response_time() ->
     lists:foreach(fun(Node) ->
         gen_server:cast(?MODULE, {get_average_response_time, Node})
+    end, achlys_util:get_neighbors()).
+
+get_timeout_per_second() ->
+    lists:foreach(fun(Node) ->
+        gen_server:cast(?MODULE, {get_timeout_per_second}, Node)
     end, achlys_util:get_neighbors()).
 
 % @pre -

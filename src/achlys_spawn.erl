@@ -1,8 +1,12 @@
 -module(achlys_spawn).
 -behaviour(gen_server).
 
--define(MAX_RUNNING, 1).
--define(MAX_SCHEDULE, 1).
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
+-define(MAX_RUNNING, 50).
+-define(MAX_SCHEDULE, 100).
 
 -export([
     init/1,
@@ -31,16 +35,6 @@
     hops = [] :: list()
 }).
 
--record(forwarded_task, {
-    task :: #task{},
-    timer :: identifier()
-}).
-
--record(running_task, {
-    task :: #task{},
-    pid :: identifier()
-}).
-
 -record(header, {
     src :: any()
 }).
@@ -49,11 +43,6 @@
     header :: #header{},
     body :: any()
 }).
-
-
-% scheduled_tasks = [task1, task2]
-% running_tasks = orddict(#{ID1 => running_task, ID2 => running_task, ...})
-% forwarded_tasks = orddict(#{ID1 => forwarded_task, ID2 => forwarded_task, ...})
 
 % @pre -
 % @post -
@@ -64,271 +53,320 @@ start_link() ->
 % @post -
 init([]) ->
     {ok, #{
-        scheduled_tasks => queue:new(),
+        tasks => orddict:new(),
+        queue => queue:new(),
         running_tasks => orddict:new(),
         forwarded_tasks => orddict:new()
     }}.
 
 % @pre -
 % @post -
-schedule_task(Task, State) ->
-    maps:update_with(scheduled_tasks, fun(Q) ->
-        queue:in(Task, Q)
+get_task(ID, State) ->
+    Tasks = maps:get(tasks, State),
+    orddict:find(ID, Tasks).
+
+% @pre -
+% @post -
+add_task(Task, State) ->
+    ID = Task#task.id,
+    maps:update_with(tasks, fun(Tasks) ->
+        orddict:store(ID, Task, Tasks)
     end, State).
 
 % @pre -
 % @post -
-create_running_task(Task) ->
-    case Task of #task{
-        id = ID,
-        function = Fun,
-        arguments = Args
-    } ->
-        Pid = erlang:spawn(fun() ->
-            Result = erlang:apply(Fun, Args),
-            gen_server:cast(?MODULE, {return, ID, Result}),
-            io:format("The task will be executed~n")
-        end),
-        #running_task{
-            task = Task,
-            pid = Pid
-        }
-    end.
+add_to_queue(Task, State) ->
+    ID = Task#task.id,
+    maps:update_with(queue, fun(Q) ->
+        queue:in(ID, Q)
+    end, State).
 
 % @pre -
 % @post -
-run_task(N, State) when N > 0 ->
-    Q1 = maps:get(scheduled_tasks, State),
-    case queue:out(Q1) of
-        {empty, _Q2} ->
+add_to_running(Task, State) ->
+    maps:update_with(running_tasks, fun(RunningTasks) ->
+        case Task of #task{
+            id = ID,
+            function = Fun,
+            arguments = Args
+        } ->
+            Myself = achlys_util:myself(),
+            achlys_spawn_monitor:on_schedule(Myself, ID),
+            Pid = erlang:spawn(fun() ->
+                Myself = achlys_util:myself(),
+                Result = erlang:apply(Fun, Args),
+                gen_server:cast(?MODULE, {return, ID, Myself, Result})
+            end),
+            orddict:store(ID, Pid, RunningTasks)
+        end
+    end, State).
+
+% @pre -
+% @post -
+add_to_forwarded(Node, Task, State) ->
+    ID = Task#task.id,
+    maps:update_with(forwarded_tasks, fun(ForwardedTasks) ->
+        orddict:store(ID, Node, ForwardedTasks)
+    end, State).
+
+% @pre -
+% @post -
+run_task(N, Q, State) when N > 0 ->
+    case queue:out(Q) of
+        {empty, _} ->
             State;
-        {{value, Task}, Q2} ->
-            ID = Task#task.id,
-            run_task(N - 1, State#{
-                running_tasks := orddict:store(
-                    ID,
-                    create_running_task(Task),
-                    maps:get(running_tasks, State)
-                ),
-                scheduled_tasks := Q2
-            })
+        {{value, ID}, Queue} ->
+            RunningTasks = maps:get(running_tasks, State),
+            case orddict:is_key(ID, RunningTasks) of
+                true ->
+                    run_task(N, Queue, State);
+                false ->
+                    case get_task(ID, State) of
+                        {ok, Task} ->
+                            S1 = add_to_running(Task, State),
+                            run_task(N - 1, Queue, S1)
+                    end
+            end
     end;
-run_task(_N, State) -> State.
+run_task(_N, _Q, State) -> State.
 
 % @pre -
 % @post -
 run_tasks(State) ->
     case State of
-        #{running_tasks := Running} ->
-            N = ?MAX_RUNNING - orddict:size(Running),
-            run_task(N, State)
+        #{queue := Q, running_tasks := RunningTasks} ->
+            N = ?MAX_RUNNING - orddict:size(RunningTasks),
+            run_task(N, Q, State)
     end.
 
 % @pre -
 % @post -
-create_forwarded_task(Task) ->
-    Myself = achlys_util:myself(),
-    case achlys_spawn_monitor:choose_node(Task#task.hops) of
-        Node when Node == Myself ->
-            undefined;
-        Node ->
-            io:format("Forwarded Task~n"),
-            send(Node, {schedule, Task#task{
-                hops = [achlys_util:myself()|Task#task.hops]
-            }}), 
-            achlys_spawn_monitor:on_schedule(Node, Task#task.id),
-            Timer = set_timeout(fun() ->
-                io:format("The timer has timeout~n"),
-                gen_server:cast(?MODULE, {retry, Task}),
-                achlys_spawn_monitor:on_timeout(Node, Task#task.id)
-            end, [], 3000),
-            #forwarded_task{
-                task = Task,
-                timer = Timer
-            }
+is_forwarded(Task, State) ->
+    case State of #{forwarded_tasks := ForwardedTasks} ->
+        ID = Task#task.id,
+        orddict:is_key(ID, ForwardedTasks)
     end.
 
 % @pre -
 % @post -
-forward_task(N, State) when N > 0 ->
-    Q1 = maps:get(scheduled_tasks, State),
-    case queue:out_r(Q1) of
-        {empty, _Q2} ->
+forward_task(N, Q, State) when N > 0 ->
+    case queue:out_r(Q) of
+        {empty, _} ->
             State;
-        {{value, Task}, Q2} ->
-            ID = Task#task.id,
-            case create_forwarded_task(Task) of
-                undefined ->
-                    State;
-                Forwarded_task ->
-                    forward_task(N - 1, State#{
-                        scheduled_tasks := Q2,
-                        forwarded_tasks := orddict:store(
-                            ID,
-                            Forwarded_task,
-                            maps:get(forwarded_tasks, State)
-                        )
-                    })
+        {{value, ID}, Queue} ->
+            case get_task(ID, State) of {ok, Task} ->
+                case is_forwarded(Task, State) of
+                    true -> State;
+                    false ->
+                        Myself = achlys_util:myself(),
+                        Hops = Task#task.hops,
+                        case achlys_spawn_monitor:choose_node(Hops) of
+                            Node when Node == Myself ->
+                                State;
+                            Node ->
+                                achlys_spawn_monitor:on_schedule(Node, ID),
+                                send(Node, {schedule, Task#task{
+                                    hops = [achlys_util:myself()|Task#task.hops]
+                                }}),
+                                S1 = add_to_forwarded(Node, Task, State),
+                                forward_task(N - 1, Queue, S1)
+                        end
+                end
             end
     end;
-forward_task(_N, State) -> State.
+forward_task(_N, _Q, State) -> State.
 
 % @pre -
 % @post -
 forward_tasks(State) ->
-    case State of
-        #{scheduled_tasks := Q} ->
-            N = queue:len(Q) - ?MAX_SCHEDULE,
-            forward_task(N, State)
+    case State of #{queue := Q} ->
+        N = queue:len(Q) - ?MAX_SCHEDULE,
+        forward_task(N, Q, State)
     end.
 
 % @pre -
 % @post -
-remove_from_forwarded(ID, Result, State) ->
-    case State of #{forwarded_tasks := Forwarded} ->
-        case orddict:find(ID, Forwarded) of
-            {ok, #forwarded_task{
-                timer = Timer,
-                task = #task{
-                    callback = Callback,
-                    hops = []
-                }
-            }} ->
-                kill(Timer),
-                erlang:apply(Callback, [Result]),
-                forward_tasks(State#{
-                    forwarded_tasks := orddict:erase(
-                        ID,
-                        Forwarded
-                    )
-                });
-            {ok, #forwarded_task{
-                timer = Timer,
-                task = #task{
-                    hops = [Node|_Nodes]
-                }
-            }} ->
-                kill(Timer),
-                send(Node, {return, ID, Result}),
-                forward_tasks(State#{
-                    forwarded_tasks := orddict:erase(
-                        ID, 
-                        Forwarded
-                    )
-                });
+remove_from_running(ID, State) ->
+    case State of #{running_tasks := RunningTasks} ->
+        case orddict:find(ID, RunningTasks) of
+            {ok, Pid} ->
+                kill(Pid),
+                maps:update(
+                    running_tasks,
+                    orddict:erase(ID, RunningTasks),
+                    State
+                );
             error -> State
         end
     end.
 
 % @pre -
 % @post -
-remove_from_running(ID, Result, State) ->
-    case State of #{running_tasks := Running} ->
-        case orddict:find(ID, Running) of
-            {ok, #running_task{
-                pid = Pid,
-                task = #task{
-                    callback = Callback,
-                    hops = []
-                }
-            }} ->
-                kill(Pid),
-                erlang:apply(Callback, [Result]),
-                run_tasks(State#{
-                    running_tasks := orddict:erase(
-                        ID,
-                        Running
-                    )
-                });
-            {ok, #running_task{
-                pid = Pid,
-                task = #task{
-                    hops = [Node|_Nodes]
-                }
-            }} ->
-                kill(Pid),
-                send(Node, {return, ID, Result}),
-                run_tasks(State#{
-                    running_tasks := orddict:erase(
-                        ID,
-                        Running
-                    )
-                });
-            error -> State
+remove_from_forwarded(ID, State) ->
+    case State of #{forwarded_tasks := ForwardedTasks} ->
+        case orddict:is_key(ID, ForwardedTasks) of
+            true ->
+                maps:update(
+                    forwarded_tasks,
+                    orddict:erase(ID, ForwardedTasks),
+                    State
+                );
+            false -> State
         end
     end.
 
-% =================================================
+% @pre -
+% @post -
+remove_from_queue(ID, State) ->
+    case State of #{queue := Q} ->
+        maps:update(
+            queue,
+            queue:filter(fun(X) ->
+                not (X == ID)
+            end, Q),
+            State
+        )
+    end.
+
+% @pre -
+% @post -
+remove_task(ID, State) ->
+    case State of #{tasks := Tasks} ->
+        maps:put(
+            tasks,
+            orddict:erase(ID, Tasks),
+            State
+        )
+    end.
+
+% @pre -
+% @post -
+get_worker(ID, State) ->
+    case State of #{forwarded_tasks := ForwardedTasks} ->
+        orddict:find(ID, ForwardedTasks)
+    end.
+
+% @pre -
+% @post -
+print(State) ->
+    case State of #{
+        tasks := Tasks,
+        queue := Q,
+        running_tasks := RunningTasks,
+        forwarded_tasks := ForwardedTasks
+    } ->
+        io:format("~n"),
+        io:format("Tasks: ~p~n", [Tasks]),
+        io:format("Queue: ~p~n", [queue:to_list(Q)]),
+        io:format("Running tasks: ~p~n", [RunningTasks]),
+        io:format("Forwarded tasks: ~p~n", [ForwardedTasks]),
+        io:format("~n")
+    end.
+
+% =============================================
 % Handle cast:
-% =================================================================
+% =============================================
 
+% @pre -
+% @post -
 handle_cast(#message{header = Header, body = Body}, State) ->
-    gen_server:cast(?MODULE, Body),
     case Body of
-        {return, ID, _Result} ->
+        {return, ID, Result} ->
             Node = Header#header.src,
-            achlys_spawn_monitor:on_return(Node, ID);
-        _ -> ok
+            gen_server:cast(?MODULE, {return, ID, Node, Result});
+        _ ->
+            gen_server:cast(?MODULE, Body)
     end,
     {noreply, State};
 
 % @pre -
 % @post -
 handle_cast({schedule, Task}, State) ->
-    S1 = schedule_task(Task, State),
-    S2 = run_tasks(S1),
-    S3 = forward_tasks(S2),
-    {noreply, S3};
-
-% @pre -
-% @post -
-handle_cast({return, ID, Result}, State) ->
-    S1 = remove_from_forwarded(ID, Result, State),
-    S2 = remove_from_running(ID, Result, S1),
-    {noreply, S2};
-
-% @pre -
-% @post -
-handle_cast({retry, Task}, State) ->
-    io:format("Re-scheduling the task~n"),
-    case State of #{
-        scheduled_tasks := Scheduled,
-        forwarded_tasks := Forwarded
-    } ->
+    case State of #{tasks := Tasks} ->
         ID = Task#task.id,
-        S1 = run_tasks(State#{
-            scheduled_tasks := queue:in_r(Task, Scheduled),
-            forwarded_tasks := orddict:erase(ID, Forwarded)
-        }),
-        S2 = forward_tasks(S1),
-        {noreply, S2}
+        case orddict:is_key(ID, Tasks) of
+            true ->
+                {noreply, State};
+            false ->
+                S1 = add_task(Task, State),
+                S2 = add_to_queue(Task, S1),
+                S3 = run_tasks(S2),
+                S4 = forward_tasks(S3),
+                {noreply, S4}
+        end
     end;
 
 % @pre -
-% @post print the State
-handle_cast(debug, State) ->
-    io:format("State: ~p~n", [State]),
-    case State of #{running_tasks := Running} ->
-        N = lists:foldl(fun({_, Running_task}, Count) ->
-            Pid = Running_task#running_task.pid,
-            case erlang:is_process_alive(Pid) of
-                true -> Count + 1;
-                false -> Count
-            end
-        end, 0, orddict:to_list(Running)),
-        % io:format("Running queue size: ~p", []),
-        % io:format("Scheduled queue size: ~p", []),
-        % io:format("Forwarded queue size: ~p", []),
-        io:format("Number of alive processes: ~p~n", [N])
+% @post -
+handle_cast({return, ID, Node, Result}, State) ->
+
+    case achlys_util:myself() of
+        Myself when Myself == Node ->
+            achlys_spawn_monitor:on_return(Myself, ID),
+            case get_worker(ID, State) of
+                {ok, Worker} ->
+                    send(Worker, {kill, ID}),
+                    achlys_spawn_monitor:on_delete(Worker, ID);
+                error -> ok
+            end;
+        Myself ->
+            achlys_spawn_monitor:on_return(Node, ID),
+            achlys_spawn_monitor:on_delete(Myself, ID)
     end,
+
+    case get_task(ID, State) of
+        {ok, #task{
+            callback = Callback,
+            hops = Hops
+        }} ->
+            case Hops of
+                [] -> erlang:apply(Callback, [Result]);
+                [Hop|_] -> send(Hop, {return, ID, Result})
+            end,
+            S1 = remove_from_forwarded(ID, State),
+            S2 = remove_from_running(ID, S1),
+            S3 = remove_from_queue(ID, S2),
+            S4 = remove_task(ID, S3),
+            S5 = run_tasks(S4),
+            {noreply, S5};
+        error ->
+            {noreply, State}
+    end;
+
+% @pre -
+% @post -
+handle_cast({kill, ID}, State) ->
+    Myself = achlys_util:myself(),
+    case get_worker(ID, State) of
+        {ok, Worker} ->
+            send(Worker, {kill, ID}),
+            achlys_spawn_monitor:on_delete(Worker, ID);
+        error -> ok
+    end,
+    achlys_spawn_monitor:on_delete(Myself, ID),
+    S1 = remove_from_forwarded(ID, State),
+    S2 = remove_from_running(ID, S1),
+    S3 = remove_from_queue(ID, S2),
+    S4 = remove_task(ID, S3),
+    S5 = run_tasks(S4),
+    {noreply, S5};
+
+% @pre -
+% @post -
+handle_cast(debug, State) ->
+    print(State),
     {noreply, State};
 
+% @pre -
+% @post -
 handle_cast(Message, State) ->
     io:format("Unknown message~p~n", [Message]),
     {noreply, State}.
 
 % Call:
 
+% @pre -
+% @post -
 handle_call(_Request, _From, State) ->
     {noreply, State}.
 
@@ -344,27 +382,9 @@ handle_info(_Info, State) ->
 % @pre -
 % @post -
 terminate(_Reason, State) ->
-    case State of #{
-        running_tasks := Running,
-        forwarded_tasks := Forwarded
-    } ->
-        ok
-        % TODO
-        % lists:foreach(fun(RunningTask) -> end, Running)
-        % lists:foreach(fun(ForwardedTask) -> end, Forwarded),
-    end.
+    ok.
 
 % Helpers:
-
-% @pre  Fun is the function to run when timeout
-%       Args are the arguments of the function Fun
-%       Delay is the time in ms before the timeout
-% @post Spawn a new process with a timer, after the Delay (timeout), Fun is run
-set_timeout(Fun, Args, Delay) ->
-    erlang:spawn(fun() ->
-        timer:sleep(Delay),
-        erlang:apply(Fun, Args)
-    end).
 
 % @pre Pid is a process
 % @post The process Pid is killed
@@ -381,12 +401,13 @@ kill(Pid) ->
 %       Callback is a function
 % @post Create a task containing Fun, Args and Callback and schedule it
 schedule(Fun, Args, Callback) ->
-    gen_server:cast(?MODULE, {schedule, #task{
+    Task = #task{
         id = erlang:unique_integer(),
         function = Fun,
         arguments = Args,
         callback = Callback
-    }}).
+    },
+    gen_server:cast(?MODULE, {schedule, Task}).
 
 % @pre -
 % @post -
