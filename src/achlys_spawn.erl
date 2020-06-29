@@ -302,6 +302,7 @@ handle_cast({return, ID, Node, Result}, State) ->
 
     case achlys_util:myself() of
         Myself when Myself == Node ->
+            % io:format("Returning: ID=~p Result=~p~n", [ID, Result]),
             achlys_spawn_monitor:on_return(Myself, ID),
             case get_worker(ID, State) of
                 {ok, Worker} ->
@@ -310,6 +311,7 @@ handle_cast({return, ID, Node, Result}, State) ->
                 error -> ok
             end;
         Myself ->
+            % io:format("Receiving from ~p: ID=~p Result=~p~n", [Node, ID, Result]),
             achlys_spawn_monitor:on_return(Node, ID),
             achlys_spawn_monitor:on_delete(Myself, ID)
     end,
@@ -382,7 +384,12 @@ handle_info(_Info, State) ->
 % @pre -
 % @post -
 terminate(_Reason, State) ->
-    ok.
+    case State of #{running_tasks := RunningTasks} ->
+        L = orddict:from_list(RunningTasks),
+        lists:foreach(fun({_, Pid}) ->
+            kill(Pid)
+        end, L)
+    end.
 
 % Helpers:
 
