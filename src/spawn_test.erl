@@ -1,15 +1,24 @@
 -module(spawn_test).
 
 -export([
-    test_async/2,
     test_sync/2,
+    test_sync_burst/3,
+    test_async/2,
     test_async_burst/3,
-    test_sync_burst/3
+    test_async_timeout/0,
+    test_async_error/0
 ]).
 
 % Tests:
+
+% spawn_test:test_sync(2, 10).
+% spawn_test:test_sync(100, 100).
+
 % spawn_test:test_async(2, 10).
-% spawn_test:test_async(1000, 100).
+% spawn_test:test_async(10000, 100).
+% spawn_test:test_async_burst(10, 100, 500).
+% spawn_test:test_async_error().
+% spawn_test:test_async_timeout().
 
 % @pre -
 % @post -
@@ -24,10 +33,6 @@ test_async(N, MaxDelay) when MaxDelay > 0 ->
         end)
     end).
 
-% Tests:
-% spawn_test:test_sync(2, 10).
-% spawn_test:test_sync(100, 100).
-
 % @pre -
 % @post -
 test_sync(N, MaxDelay) when MaxDelay > 0 ->
@@ -41,10 +46,6 @@ test_sync(N, MaxDelay) when MaxDelay > 0 ->
             io:format("Result ~p~n", [Result])
         end)
     end).
-
-% spawn_test:test_sync(2, 10).
-% spawn_test:test_sync(100, 100).
-% spawn_test:test_async_burst(10, 100, 500).
 
 % @pre -
 % @post -
@@ -77,4 +78,22 @@ test_sync_burst(N, M, MaxDelay) ->
                 io:format("Result ~p~n", [Result])
             end)
         end)
+    end).
+
+% @pre -
+% @post -
+test_async_error() ->
+    achlys_spawn:schedule(fun() ->
+        1 / 0 % Error
+    end, [], fun(Result) ->
+        io:format("Result ~p~n", [Result])
+    end).
+
+% @pre -
+% @post -
+test_async_timeout() ->
+    achlys_spawn:schedule(fun() ->
+        timer:sleep(3000)
+    end, [], fun(Result) ->
+        io:format("Result ~p~n", [Result])
     end).

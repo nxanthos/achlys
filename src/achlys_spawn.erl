@@ -5,6 +5,7 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
+-define(TIMEOUT, 1000).
 -define(MAX_RUNNING, 50).
 -define(MAX_SCHEDULE, 100).
 
@@ -83,22 +84,63 @@ add_to_queue(Task, State) ->
 
 % @pre -
 % @post -
+worker(Parent, Fun, Args) ->
+    Opts = [
+        link,
+        {max_heap_size, #{
+            size => 1000,
+            kill => true,
+            error_logger => false
+        }}
+    ],
+    erlang:spawn_opt(fun() ->
+        try erlang:apply(Fun, Args) of
+            Result ->
+                Parent ! {ok, Result}
+            catch error:Error ->
+                Parent ! {error, Error}
+        end
+    end, Opts).
+
+% @pre -
+% @post -
+execute_function(Task) ->
+    case Task of #task{
+        id = ID,
+        function = Fun,
+        arguments = Args
+    } ->
+        erlang:spawn(fun () ->
+            process_flag(trap_exit, true),
+            Pid = worker(self(), Fun, Args),
+            Myself = achlys_util:myself(),
+            receive
+                {ok, Result} ->
+                    Term = {return, ID, Myself, {ok, Result}},
+                    gen_server:cast(?MODULE, Term);
+                {error, Error} ->
+                    Term = {return, ID, Myself, {error, Error}},
+                    gen_server:cast(?MODULE, Term);
+                {'EXIT', _Parent, Reason} ->
+                    Term = {return, ID, Myself, killed},
+                    gen_server:cast(?MODULE, Term)
+            after ?TIMEOUT ->
+                erlang:exit(Pid, shutdown),
+                Term = {return, ID, Myself, timeout},
+                gen_server:cast(?MODULE, Term)
+            end
+        end)
+    end.
+
+% @pre -
+% @post -
 add_to_running(Task, State) ->
     maps:update_with(running_tasks, fun(RunningTasks) ->
-        case Task of #task{
-            id = ID,
-            function = Fun,
-            arguments = Args
-        } ->
-            Myself = achlys_util:myself(),
-            achlys_spawn_monitor:on_schedule(Myself, ID),
-            Pid = erlang:spawn(fun() ->
-                Myself = achlys_util:myself(),
-                Result = erlang:apply(Fun, Args),
-                gen_server:cast(?MODULE, {return, ID, Myself, Result})
-            end),
-            orddict:store(ID, Pid, RunningTasks)
-        end
+        ID = Task#task.id,
+        Myself = achlys_util:myself(),
+        achlys_spawn_monitor:on_schedule(Myself, ID),
+        Pid = execute_function(Task),
+        orddict:store(ID, Pid, RunningTasks)
     end, State).
 
 % @pre -
