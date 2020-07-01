@@ -57,7 +57,14 @@ handle_cast({on_return, Node, ID}, State) ->
         case orddict:find(Key, Logs) of
             {ok, Timestamp} ->
                 Now = erlang:system_time(millisecond),
-                Measure = {Now, Now - Timestamp},
+                ResponseTime = Now - Timestamp,
+                Measure = {Now, ResponseTime},
+                logger:info("[SPAWN]: source=~p;destination=~p;timestamp=~p;response_time=~p~n", [
+                    achlys_util:myself(),
+                    Node,
+                    Timestamp,
+                    ResponseTime
+                ]),
                 {noreply, State#{
                     logs := orddict:erase(Key, Logs),
                     response_times := prepend(Node, Measure, ResponseTimes)
@@ -218,17 +225,13 @@ choose_node(Hops) ->
 
     case Nodes of
         [] ->
-            Orddict = get_average_response_times(Nodes),
-            io:format("ARS = ~p~n", [Orddict]),
-            io:format("Chosen node = ~p~n", [Myself]),
-            io:format("~n"), 
             Myself;
         _ ->
             Orddict = get_average_response_times(Nodes),
             {Node, _} = orddict:fold(fun(K1, V1, Min) ->
                 case Min of
                     undefined -> {K1, V1};
-                    {K2, V2} when V1 < V2 -> {K1, V1};
+                    {_K2, V2} when V1 < V2 -> {K1, V1};
                     _ -> Min
                 end
             end, undefined, Orddict),
