@@ -5,9 +5,10 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
--define(TIMEOUT, 1000).
+-define(TIMEOUT, 3000).
 -define(MAX_RUNNING, 50).
--define(MAX_SCHEDULE, 100).
+-define(MAX_SCHEDULE, 450).
+-define(LOG_INTERVAL, 100).
 
 -export([
     init/1,
@@ -53,6 +54,7 @@ start_link() ->
 % @pre -
 % @post -
 init([]) ->
+    erlang:send_after(?LOG_INTERVAL, ?MODULE, write_log),
     {ok, #{
         tasks => orddict:new(),
         queue => queue:new(),
@@ -166,9 +168,6 @@ run_task(N, Q, State) when N > 0 ->
                     case get_task(ID, State) of
                         {ok, Task} ->
                             S1 = add_to_running(Task, State),
-                            logger:info("[SPAWN-RUNNING]: node=~p;running_tasks=~p~n", [
-                                achlys_util:myself(), 
-                                orddict:size(maps:get(running_tasks, S1))]),
                             run_task(N - 1, Queue, S1)
                     end
             end
@@ -214,9 +213,6 @@ forward_task(N, Q, State) when N > 0 ->
                                     hops = [achlys_util:myself()|Task#task.hops]
                                 }}),
                                 S1 = add_to_forwarded(Node, Task, State),
-                                logger:info("[SPAWN-FORWARDED]: node=~p;forwarded_tasks=~p~n", [
-                                    achlys_util:myself(),
-                                    orddict:size(maps:get(forwarded_tasks, S1))]),
                                 forward_task(N - 1, Queue, S1)
                         end
                 end
@@ -340,9 +336,6 @@ handle_cast({schedule, Task}, State) ->
                 S2 = add_to_queue(Task, S1),
                 S3 = run_tasks(S2),
                 S4 = forward_tasks(S3),
-                logger:info("[SPAWN-TASKS]: node=~p;tasks=~p~n", [
-                    achlys_util:myself(),
-                    orddict:size(maps:get(tasks, S4))]),
                 {noreply, S4}
         end
     end;
@@ -424,6 +417,24 @@ handle_call(_Request, _From, State) ->
     {noreply, State}.
 
 % Info:
+
+% @pre -
+% @post -
+handle_info(write_log, State) ->
+    case State of #{
+        queue := Q,
+        running_tasks := RunningTasks,
+        forwarded_tasks := ForwardedTasks
+    } ->
+        logger:info("[SPAWN-QUEUE]: node=~p;running_tasks=~p;forwarded_tasks=~p;queue=~p~n", [
+            achlys_util:myself(), 
+            orddict:size(RunningTasks),
+            orddict:size(ForwardedTasks),
+            queue:len(Q)
+        ])
+    end,
+    erlang:send_after(?LOG_INTERVAL, ?MODULE, write_log),
+    {noreply, State};
 
 % @pre -
 % @post -
