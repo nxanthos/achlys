@@ -1,6 +1,10 @@
 -module(achlys_spawn_monitor).
 -behaviour(gen_server).
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 -export([
     init/1,
     start_link/0,
@@ -52,7 +56,7 @@ handle_cast({on_schedule, Node, ID}, State) ->
 % @pre -
 % @post -
 handle_cast({on_return, Node, ID}, State) ->
-    case State of #{ logs := Logs, response_times := ResponseTimes } ->
+    case State of #{logs := Logs, response_times := ResponseTimes} ->
         Key = {Node, ID},
         case orddict:find(Key, Logs) of
             {ok, Timestamp} ->
@@ -67,7 +71,7 @@ handle_cast({on_return, Node, ID}, State) ->
                 ]),
                 {noreply, State#{
                     logs := orddict:erase(Key, Logs),
-                    response_times := prepend(Node, Measure, ResponseTimes)
+                    response_times := orddict:append(Node, Measure, ResponseTimes)
                 }};
             error ->
                 {noreply, State}
@@ -77,7 +81,7 @@ handle_cast({on_return, Node, ID}, State) ->
 % @pre -
 % @post -
 handle_cast({on_delete, Node, ID}, State) ->
-    case State of #{ logs := Logs } ->
+    case State of #{logs := Logs} ->
         Key = {Node, ID},
         {noreply, State#{
             logs := orddict:erase(Key, Logs)
@@ -98,19 +102,15 @@ handle_cast(_Message, State) ->
 % @pre -
 % @post -
 handle_call({get_average_response_time, Node}, _From, State) ->
-    case State of #{ response_times := ResponseTimes } ->
+    case State of #{response_times := ResponseTimes} ->
         case orddict:find(Node, ResponseTimes) of
             {ok, Measures} ->
-                Lifespan = 1000,
                 Now = erlang:system_time(millisecond),
-                L = remove_old_measures(Measures, Now, Lifespan),
-                AverageResponseTime = get_EMA(L, Now, Lifespan),
+                EstimatedResponseTime = get_estimated_response_time(Measures, Now),
                 % io:format("Average=~p~n", [AverageResponseTime]),
                 % io:format("Node=~p~n", [Node]),
                 % io:format("L=~p~n", [L]),
-                {reply, AverageResponseTime, State#{
-                    response_times := orddict:store(Node, L, ResponseTimes)
-                }};
+                {reply, EstimatedResponseTime, State};
             error ->
                 {reply, 0, State}
         end
@@ -128,56 +128,47 @@ handle_info(_Info, State) ->
 
 % @pre -
 % @post -
-terminate(_Reason, State) ->
+terminate(_Reason, _State) ->
     ok.
 
 % Helpers:
 
 % @pre -
 % @post -
-prepend(Key, Value, Orddict) ->
-    case orddict:find(Key, Orddict) of
-        {ok, List} ->
-            orddict:store(Key, [Value|List], Orddict);
-        error ->
-            orddict:store(Key, [Value|[]], Orddict)
+get_ema(Measures, T) ->
+    Tau = 1,
+    lists:foldl(fun({X, Y}, Average) ->
+        Alpha = 1 - math:exp(-(T - X) / Tau),
+        Average + Alpha * (Y - Average)
+    end, 0, Measures).
+
+% @pre -
+% @post -
+get_decay(Measure, T) ->
+    case Measure of {X, Y} ->
+        Lambda = 0.001,
+        Dt = T - X,
+        Y - (Y * math:exp(- Lambda * Dt))
     end.
 
-% @pre -
-% @post -
-exp(X, Lambda) ->
-    case X < 0 of
-        true -> 0;
-        false -> Lambda * math:exp(- Lambda * X)
+% % @pre -
+% % @post -
+get_estimated_response_time([], T) -> 0;
+get_estimated_response_time(Measures, T) ->
+    case lists:last(Measures) of
+        {X, Y} = Measure when X < T ->
+            Ema = get_ema(Measures, T),
+            Decay = get_decay(Measure, T),
+            Ema - Decay;
+        _ ->
+            get_estimated_response_time(lists:takewhile(fun({X, _Y}) -> X < T end, Measures), T)
     end.
-
-% @pre -
-% @post -
-get_lambda(X, Percentage) ->
-    Num = math:log(1 - Percentage),
-    Denum = math:log(math:exp(1)),
-    - (Num / Denum) / X.
-
-% @pre -
-% @post -
-get_EMA(Measures, Now, Lifespan) ->
-    Terms = lists:map(fun({X, Y}) ->
-        Lambda = get_lambda(Lifespan, 0.5),
-        Weight = exp(Now - X, Lambda),
-        {Weight, Y}
-    end, Measures),
-    Total = lists:foldl(fun({Weight, _Y}, Sum) ->
-        Sum + Weight
-    end, 0, Terms),
-    lists:foldl(fun({Weight, Y}, Average) ->
-        Average + (Weight / Total) * Y
-    end, 0, Terms).
 
 % @pre -
 % @post -
 remove_old_measures(Measures, Now, Lifespan) ->
-    lists:takewhile(fun({X, _Y}) ->
-        Now - X < Lifespan
+    lists:dropwhile(fun({X, _Y}) ->
+        Now - X > Lifespan
     end, Measures).
 
 % API:
@@ -235,7 +226,7 @@ choose_node(Hops) ->
                     _ -> Min
                 end
             end, undefined, Orddict),
-            io:format("ARS = ~p~n", [Orddict]),
+            io:format("Estimated response times = ~p~n", [Orddict]),
             io:format("Chosen node = ~p~n", [Node]),
             io:format("~n"),
             Node
@@ -245,3 +236,34 @@ choose_node(Hops) ->
 % @post -
 debug() ->
     gen_server:cast(?MODULE, debug).
+
+% ---------------------------------------------
+% EUnit tests:
+% ---------------------------------------------
+
+-ifdef(TEST).
+
+% @pre -
+% @post -
+ema_test() ->
+    Xs = [
+        0, 50, 100, 150, 200, 250, 300, 350, 400, 450,
+        500, 550, 600, 650, 700, 750, 800, 850, 900, 950
+    ],
+    Ys = [
+        0, 50, 100, 150, 200, 250, 300, 350, 400, 450,
+        500, 550, 600, 650, 700, 750, 800, 850, 900, 950
+    ],
+    Measures = lists:zip(Xs, Ys),
+    Epsilon = 1,
+    ?assert(erlang:abs(get_estimated_response_time(Measures, 996) - 907) =< Epsilon),
+    ?assert(erlang:abs(get_estimated_response_time(Measures, 574) - 537) =< Epsilon),
+    ?assert(erlang:abs(get_estimated_response_time(Measures, 70) - 49) =< Epsilon),
+    ?assert(erlang:abs(get_estimated_response_time(Measures, 700) - 618) =< Epsilon),
+    ok.
+
+-endif.
+
+% Print value: ?debugVal().
+% To launch the tests:
+% rebar3 eunit --module=achlys_spawn_monitor
