@@ -45,7 +45,7 @@ example_1() ->
 example_2() ->
 
     IVar = {<<"table">>, state_gset},
-    Path = "data.csv",
+    Path = "dataset/data.csv",
     file_reader:load_csv(Path, IVar),
 
     OVar = achlys_mr:schedule([
@@ -71,7 +71,7 @@ example_3() ->
 
     IVar = {<<"documents">>, state_gset},
     lasp:bind(IVar, {state_gset, [
-        "This is my cats",
+        "These are my cats",
         "The cats are over there",
         "I love cats"
     ]}),

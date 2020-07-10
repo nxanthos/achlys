@@ -5,6 +5,10 @@
     start_link/2
 ]).
 
+-record(options, {
+    max_batch_size :: integer()
+}).
+
 % @pre  ID is a unique ID, identifying the MapReduce
 %       Entries is a list of tuples composed of a Variable and a map function {Var, fun}
 %       Reduce is a reduce function
@@ -135,67 +139,12 @@ start_round(Parent, ID, Round, InputPairs, Reduce, Options) ->
     end.
 
 % @pre -
-% @post - This function should return a list of tuples:
-%       [
-%           {ID, [{Key 1, Value 1}, {Key 2, Value 2}]},
-%           {ID, [{Key 3, Value 3}]}
-%       ]
-get_batches(InputPairs, Options) ->
-    Groups = lists:foldl(fun(Pair, Orddict) ->
-        case Pair of {Key, _} ->
-            orddict:append(Key, Pair, Orddict)
-        end
-    end, orddict:new(), InputPairs),
-    Fun = fun({_, Pairs}) ->
-        Name = erlang:unique_integer([monotonic, positive]),
-        {Name, Pairs}
-    end,
-    lists:map(Fun, orddict:to_list(Groups)).
-
-% @pre -
 % @post -
-group_pairs_per_key(Pairs) ->
-    Groups = lists:foldl(fun(Pair, Orddict) ->
-        case Pair of {Key, Value} ->
-            orddict:append(Key, Value, Orddict)
-        end
-    end, orddict:new(), Pairs),
-    orddict:to_list(Groups).
-
-% @pre -
-% @post -
-reduce(InputPairs, Reduce) ->
-    Groups = group_pairs_per_key(InputPairs),
-    lists:flatmap(fun({Key, Pairs}) ->
-        erlang:apply(Reduce, [Key, Pairs])
-    end, Groups).
-
-% @pre -
-% @post -
-get_tasks(Batches, Reduce) ->
-    % This function should return a list of tuples :
-    
-    lists:foldl(fun({Name, Pairs}, Acc) ->
-        [{fun() ->
-            timer:sleep(3000),
-            P = achlys_spawn:schedule(fun() ->
-                reduce(Pairs, Reduce)
-            end, []),
-            io:format("Input=~p Output=~p~n", [Pairs, P]),            
-            P
-        end, []}|Acc]
-    end, [], Batches).
-
-% @pre -
-% @post -
+% Diviser en batch
+% Retourner {error, Reason} si la fonction crash
+% Retourner {ok, Pairs}
 get_reduction(InputPairs, Reduce, Options) ->
-    Batches = get_batches(InputPairs, Options),
-    Tasks = get_tasks(Batches, Reduce),
-    case promise:all(Tasks) of
-        {ok, Results} ->
-            L = orddict:to_list(Results),
-            OutputPairs = lists:flatmap(fun({_, Pair}) -> Pair end, L),
-            {ok, OutputPairs};
-        max_attempts_reached ->
-            {error, max_attempts_reached}
-    end.
+    % TODO: Add method fork
+    achlys_mr_dispatcher:start(InputPairs, Reduce, #options{
+        max_batch_size = 10
+    }).
